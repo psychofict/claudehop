@@ -1,0 +1,7 @@
+# Never let a credential into the repo.
+accounts/
+*.token
+*.credentials.json
+*.bak
+__pycache__/
+*.pyc
