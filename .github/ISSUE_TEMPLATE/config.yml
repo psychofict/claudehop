@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security issue
+    url: https://github.com/psychofict/claude-acct/security/advisories/new
+    about: Report anything that could expose a credential privately, not as an issue.

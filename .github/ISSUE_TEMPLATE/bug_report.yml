@@ -1,0 +1,41 @@
+name: Bug report
+description: Something didn't work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste a token, a credential file, or the contents of
+        `~/.claude/accounts/`.** `claude-acct doctor` prints no secrets — it is
+        safe to paste.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you got.
+      placeholder: |
+        $ claude-acct use work
+        ...
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `claude-acct doctor`
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and shell
+      placeholder: macOS 15.4, zsh 5.9
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: python3 and Claude Code versions
+      placeholder: python 3.12.3, claude 2.1.222
+    validations:
+      required: true

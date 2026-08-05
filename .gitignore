@@ -5,3 +5,4 @@ accounts/
 *.bak
 __pycache__/
 *.pyc
+.ruff_cache/

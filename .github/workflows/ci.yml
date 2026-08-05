@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: compile
+        run: python3 -m py_compile bin/claude-acct
+      - name: test
+        run: ./test/test-switch.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ruff
+      - name: ruff
+        run: ruff check --select=E,F,W,B,UP --line-length=110 --target-version=py39 bin/claude-acct
+      - name: shellcheck
+        run: shellcheck -S warning install.sh shell/claude-acct.sh test/test-switch.sh
+      - name: install and uninstall cleanly
+        run: |
+          set -euo pipefail
+          export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/claude"
+          printf 'export FOO=1\n' > "$RUNNER_TEMP/rc"
+          ./install.sh --rc "$RUNNER_TEMP/rc"
+          grep -q 'claude-acct.sh' "$RUNNER_TEMP/rc"
+          ./install.sh --rc "$RUNNER_TEMP/rc"          # idempotent
+          test "$(grep -c 'claude-acct.sh' "$RUNNER_TEMP/rc")" = 1
+          ./install.sh --uninstall --rc "$RUNNER_TEMP/rc"
+          ! grep -q 'claude-acct.sh' "$RUNNER_TEMP/rc"
