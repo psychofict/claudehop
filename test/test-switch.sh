@@ -256,19 +256,46 @@ print(d['mcpOAuth']['vercel|x']['accessToken'])")" "vca_KEEPME"
 is "keychain backend reports itself" "$(kc doctor --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["backend"])')" "keychain"
 
 # --- 12. `add` never leaves you logged out ------------------------------------
-# A login attempt that produces nothing must put the previous credentials back.
+# `add` clears the live credentials before handing you to `claude` for /login.
+# If that produces nothing — no `claude`, an immediate exit, Ctrl-C — the old
+# credentials must come back. Driven in-process: it needs a tty and a `claude`,
+# and faking both with a pty hangs on some platforms.
+add_with() {  # add_with <python body for the fake `claude` run>
+  ACCT="$ACCT" FAKE_CLAUDE="$1" python3 - <<'PY' >/dev/null 2>&1
+import importlib.machinery, importlib.util, json, os, sys
+
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["ACCT"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+
+class Tty:                      # cmd_add insists on a real terminal
+    def isatty(self):
+        return True
+sys.stdin = Tty()
+ca.shutil.which = lambda cmd: "/bin/true"
+ca.subprocess.call = lambda *a, **k: exec(os.environ["FAKE_CLAUDE"], {"ca": ca, "json": json})
+try:
+    ca.cmd_add(name="gamma", yes=True)
+except SystemExit:
+    pass
+PY
+}
+
 seed
-cat > "$TMP/bin/claude" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-chmod +x "$TMP/bin/claude"
-PATH="$TMP/bin:$PATH" python3 -c "
-import os, pty, sys
-sys.exit(pty.spawn([sys.argv[1], 'add', 'gamma', '-y'])>>8)" "$ACCT" >/dev/null 2>&1
+add_with 'pass'                                  # `claude` exits, nobody logs in
 is "a failed add restores the previous login" "$(live_token)" "tok-A"
 [ ! -e "$CLAUDE_ACCOUNTS_DIR/gamma.json" ] \
   && ok "a failed add saves no profile" || bad "a failed add saves no profile" "gamma.json exists"
+
+seed
+add_with 'raise KeyboardInterrupt'               # Ctrl-C at the login prompt
+is "Ctrl-C during add restores the previous login" "$(live_token)" "tok-A"
+
+seed
+add_with 'ca.set_live_oauth({"accessToken": "tok-NEW", "expiresAt": 99999999999999})'
+is "a real login is saved under the new name" "$(saved_token gamma)" "tok-NEW"
+is "the new account becomes active"           "$(cat "$CLAUDE_ACCOUNTS_DIR/active")" "gamma"
+is "the account we were on was saved first"   "$(saved_token alpha)" "tok-A"
 
 # --- 13. unit checks on the tricky helpers ------------------------------------
 unit() {  # unit <name> <python expression> <expected>
