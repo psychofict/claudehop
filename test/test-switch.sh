@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Exercises claude-acct against a throwaway config dir with fake credentials.
+# Exercises claudehop against a throwaway config dir with fake credentials.
 # No network, no real Claude account, nothing outside $TMP is touched.
 #
 #   ./test/test-switch.sh
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ACCT="$ROOT/bin/claude-acct"
-TMP="$(mktemp -d -t claude-acct-test-XXXXXX)"
+HOP="$ROOT/bin/claudehop"
+TMP="$(mktemp -d -t claudehop-test-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 export CLAUDE_CONFIG_DIR="$TMP"
 export CLAUDE_ACCOUNTS_DIR="$TMP/accounts"
-export CLAUDE_ACCT_OFFLINE=1          # never call the API from tests
-export CLAUDE_ACCT_BACKEND=file       # the keychain section overrides this
+export CLAUDE_HOP_OFFLINE=1           # never call the API from tests
+export CLAUDE_HOP_BACKEND=file        # the keychain section overrides this
 export NO_COLOR=1
 mkdir -p "$CLAUDE_ACCOUNTS_DIR" "$TMP/bin"
 
@@ -52,11 +52,11 @@ PY
   echo alpha > "$CLAUDE_ACCOUNTS_DIR/active"
 }
 
-echo "claude-acct test suite"
+echo "claudehop test suite"
 
 # --- 1. a plain switch --------------------------------------------------------
 seed
-"$ACCT" use beta >/dev/null 2>&1
+"$HOP" use beta >/dev/null 2>&1
 is "switch loads the target credentials"   "$(live_token)" "tok-B"
 is "mcpOAuth block survives the swap"      "$(jget "$TMP/.credentials.json" 'mcpOAuth.vercel|x.accessToken')" "vca_KEEPME"
 is "active pointer follows the switch"     "$(cat "$CLAUDE_ACCOUNTS_DIR/active")" "beta"
@@ -68,9 +68,9 @@ python3 -c "
 import json,os
 p=os.environ['CLAUDE_CONFIG_DIR']+'/.credentials.json'; d=json.load(open(p))
 d['claudeAiOauth']['accessToken']='tok-B-refreshed'; json.dump(d,open(p,'w'))"
-"$ACCT" use alpha >/dev/null 2>&1
+"$HOP" use alpha >/dev/null 2>&1
 is "rotated token is synced back to its profile" "$(saved_token beta)" "tok-B-refreshed"
-is "switching back restores the rotated token"   "$( "$ACCT" use beta >/dev/null 2>&1; live_token)" "tok-B-refreshed"
+is "switching back restores the rotated token"   "$( "$HOP" use beta >/dev/null 2>&1; live_token)" "tok-B-refreshed"
 [ -z "$(ls "$CLAUDE_ACCOUNTS_DIR"/unsaved-*.json 2>/dev/null)" ] \
   && ok "no junk unsaved-* profile created" \
   || bad "no junk unsaved-* profile created" "found $(ls "$CLAUDE_ACCOUNTS_DIR"/unsaved-*.json)"
@@ -82,7 +82,7 @@ import json,os
 p=os.environ['CLAUDE_CONFIG_DIR']+'/.credentials.json'; d=json.load(open(p))
 d['claudeAiOauth']['accessToken']='tok-STRANGER'; json.dump(d,open(p,'w'))"
 rm "$CLAUDE_ACCOUNTS_DIR/active"
-"$ACCT" use beta >/dev/null 2>&1
+"$HOP" use beta >/dev/null 2>&1
 [ -n "$(grep -l tok-STRANGER "$CLAUDE_ACCOUNTS_DIR"/*.json 2>/dev/null)" ] \
   && ok "unknown login is stashed before being replaced" \
   || bad "unknown login is stashed before being replaced" "tok-STRANGER is gone"
@@ -90,16 +90,16 @@ is "alpha was not clobbered by the stash" "$(saved_token alpha)" "tok-A"
 
 # --- 4. ergonomics ------------------------------------------------------------
 seed
-is "bare name is shorthand for use"  "$( "$ACCT" beta >/dev/null 2>&1; live_token)" "tok-B"
-"$ACCT" use beta 2>/dev/null | grep -q "already on" && ok "re-switching is a no-op" || bad "re-switching is a no-op" "expected 'already on'"
-"$ACCT" use nope >/dev/null 2>&1; is "unknown account exits non-zero" "$?" "1"
-"$ACCT" list 2>/dev/null | grep -q '^\*  beta' && ok "list marks the active account" || bad "list marks the active account" "no * on beta"
-is "active prints just the name"     "$("$ACCT" active 2>/dev/null)" "beta"
-"$ACCT" --version | grep -q '^claude-acct [0-9]' && ok "--version prints a version" || bad "--version prints a version" "$("$ACCT" --version)"
-"$ACCT" list --bogus >/dev/null 2>&1; is "unknown option exits 2" "$?" "2"
-"$ACCT" save 'bad/name' -y >/dev/null 2>&1; is "a name with a slash is rejected" "$?" "1"
+is "bare name is shorthand for use"  "$( "$HOP" beta >/dev/null 2>&1; live_token)" "tok-B"
+"$HOP" use beta 2>/dev/null | grep -q "already on" && ok "re-switching is a no-op" || bad "re-switching is a no-op" "expected 'already on'"
+"$HOP" use nope >/dev/null 2>&1; is "unknown account exits non-zero" "$?" "1"
+"$HOP" list 2>/dev/null | grep -q '^\*  beta' && ok "list marks the active account" || bad "list marks the active account" "no * on beta"
+is "active prints just the name"     "$("$HOP" active 2>/dev/null)" "beta"
+"$HOP" --version | grep -q '^claudehop [0-9]' && ok "--version prints a version" || bad "--version prints a version" "$("$HOP" --version)"
+"$HOP" list --bogus >/dev/null 2>&1; is "unknown option exits 2" "$?" "2"
+"$HOP" save 'bad/name' -y >/dev/null 2>&1; is "a name with a slash is rejected" "$?" "1"
 [ ! -e "$CLAUDE_ACCOUNTS_DIR/bad" ] && ok "a rejected name writes nothing" || bad "a rejected name writes nothing" "$(ls "$CLAUDE_ACCOUNTS_DIR")"
-"$ACCT" list 2>/dev/null | head -1 >/dev/null 2>&1; is "list survives a closed pipe" "$?" "0"
+"$HOP" list 2>/dev/null | head -1 >/dev/null 2>&1; is "list survives a closed pipe" "$?" "0"
 
 # --- 5. table layout ----------------------------------------------------------
 # Colour codes inside a cell used to be counted as width, so an expired token
@@ -110,31 +110,31 @@ d=os.environ['CLAUDE_ACCOUNTS_DIR']+'/alpha.json'; p=json.load(open(d))
 p['claudeAiOauth']['expiresAt']=1000; json.dump(p,open(d,'w'))"
 strip_ansi() { python3 -c 'import re,sys;sys.stdout.write(re.sub("\033\\[[0-9;]*m","",sys.stdin.read()))'; }
 plan_cols() {  # column where the PLAN cell starts, one number per data row
-  CLICOLOR_FORCE=1 "$ACCT" list 2>/dev/null \
+  CLICOLOR_FORCE=1 "$HOP" list 2>/dev/null \
     | strip_ansi | tail -n +2 \
     | awk '{print index($0,"max")}' | sort -u | tr '\n' ' '
 }
 [ "$(plan_cols | wc -w)" -eq 1 ] \
   && ok "columns line up even with colour in a cell" \
   || bad "columns line up even with colour in a cell" "PLAN starts at columns: $(plan_cols)"
-CLICOLOR_FORCE=1 "$ACCT" list 2>/dev/null | grep -q 'expired' \
+CLICOLOR_FORCE=1 "$HOP" list 2>/dev/null | grep -q 'expired' \
   && ok "an expired token is called out" || bad "an expired token is called out" "no 'expired' in the table"
 
 # --- 6. json output -----------------------------------------------------------
 seed
-"$ACCT" use beta >/dev/null 2>&1
-out="$("$ACCT" list --json 2>/dev/null)"
+"$HOP" use beta >/dev/null 2>&1
+out="$("$HOP" list --json 2>/dev/null)"
 is "list --json reports the active account" "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["active"])')" "beta"
 printf '%s' "$out" | grep -q 'tok-' && bad "json output leaks no tokens" "found a token in the JSON" || ok "json output leaks no tokens"
 is "list --json is valid json" "$(printf '%s' "$out" | python3 -c 'import json,sys;json.load(sys.stdin);print("ok")')" "ok"
 
 # --- 7. housekeeping ----------------------------------------------------------
 seed
-"$ACCT" rename alpha one >/dev/null 2>&1
+"$HOP" rename alpha one >/dev/null 2>&1
 [ -f "$CLAUDE_ACCOUNTS_DIR/one.json" ] && [ ! -e "$CLAUDE_ACCOUNTS_DIR/alpha.json" ] && [ ! -e "$CLAUDE_ACCOUNTS_DIR/alpha.json.bak" ] \
   && ok "rename leaves no stale files" || bad "rename leaves no stale files" "$(ls "$CLAUDE_ACCOUNTS_DIR")"
 is "rename moves the active pointer" "$(cat "$CLAUDE_ACCOUNTS_DIR/active")" "one"
-"$ACCT" rm one -y >/dev/null 2>&1
+"$HOP" rm one -y >/dev/null 2>&1
 [ ! -e "$CLAUDE_ACCOUNTS_DIR/one.json" ] && [ ! -e "$CLAUDE_ACCOUNTS_DIR/one.json.bak" ] \
   && ok "rm removes the profile and its backup" || bad "rm removes the profile and its backup" "$(ls "$CLAUDE_ACCOUNTS_DIR")"
 [ ! -e "$CLAUDE_ACCOUNTS_DIR/active" ] \
@@ -142,7 +142,7 @@ is "rename moves the active pointer" "$(cat "$CLAUDE_ACCOUNTS_DIR/active")" "one
 
 # --- 8. permissions -----------------------------------------------------------
 seed
-"$ACCT" use beta >/dev/null 2>&1
+"$HOP" use beta >/dev/null 2>&1
 mode() { python3 -c "import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])" "$1"; }
 is "accounts dir is 700"      "$(mode "$CLAUDE_ACCOUNTS_DIR")" "700"
 is "profiles are 600"         "$(mode "$CLAUDE_ACCOUNTS_DIR/beta.json")" "600"
@@ -165,25 +165,25 @@ print(' '.join(bad))" "$TMP")"
 
 # --- 9. doctor ----------------------------------------------------------------
 seed
-"$ACCT" doctor >/dev/null 2>&1; is "doctor is quiet on a healthy setup" "$?" "0"
+"$HOP" doctor >/dev/null 2>&1; is "doctor is quiet on a healthy setup" "$?" "0"
 echo '{"name":"broken"}' > "$CLAUDE_ACCOUNTS_DIR/broken.json"
-"$ACCT" doctor >/dev/null 2>&1; is "doctor exits non-zero on a real problem" "$?" "1"
-out="$("$ACCT" doctor 2>/dev/null)"
+"$HOP" doctor >/dev/null 2>&1; is "doctor exits non-zero on a real problem" "$?" "1"
+out="$("$HOP" doctor 2>/dev/null)"
 case "$out" in *"'broken' has no saved credentials"*) ok "doctor names the broken account" ;;
               *) bad "doctor names the broken account" "$out" ;; esac
 rm -f "$CLAUDE_ACCOUNTS_DIR/broken.json"
 cp "$CLAUDE_ACCOUNTS_DIR/beta.json" "$CLAUDE_ACCOUNTS_DIR/beta.json.bak"
-"$ACCT" doctor --fix >/dev/null 2>&1
+"$HOP" doctor --fix >/dev/null 2>&1
 [ ! -e "$CLAUDE_ACCOUNTS_DIR/beta.json.bak" ] \
   && ok "doctor --fix clears stale credential copies" || bad "doctor --fix clears stale credential copies" "beta.json.bak still there"
-"$ACCT" doctor --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["backend"])' | grep -q file \
+"$HOP" doctor --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["backend"])' | grep -q file \
   && ok "doctor --json names the backend" || bad "doctor --json names the backend" "no backend field"
 
 # --- 10. concurrent switches do not corrupt anything --------------------------
 seed
 for _ in 1 2 3 4 5 6; do
-  ( "$ACCT" use alpha >/dev/null 2>&1 ) &
-  ( "$ACCT" use beta  >/dev/null 2>&1 ) &
+  ( "$HOP" use alpha >/dev/null 2>&1 ) &
+  ( "$HOP" use beta  >/dev/null 2>&1 ) &
 done
 wait
 python3 - <<'PY' && ok "concurrent switches leave valid files" || bad "concurrent switches leave valid files" "corrupt json"
@@ -194,7 +194,7 @@ for f in os.listdir(acc):
     if f.endswith('.json'):
         json.load(open(os.path.join(acc, f)))
 PY
-[ -z "$(ls "$CLAUDE_ACCOUNTS_DIR"/*.tmp-claude-acct* 2>/dev/null)" ] \
+[ -z "$(ls "$CLAUDE_ACCOUNTS_DIR"/*.tmp-claudehop* 2>/dev/null)" ] \
   && ok "no temp files left behind" || bad "no temp files left behind" "$(ls "$CLAUDE_ACCOUNTS_DIR")"
 
 # --- 11. macOS keychain backend (driven through a fake `security`) ------------
@@ -237,7 +237,7 @@ doc = {"mcpOAuth": {"vercel|x": {"accessToken": "vca_KEEPME"}},
                          "expiresAt": 99999999999999}}
 open(os.environ['KEYCHAIN_FAKE'], 'w').write(binascii.hexlify(json.dumps(doc).encode()).decode())
 PY
-kc() { PATH="$TMP/bin:$PATH" CLAUDE_ACCT_BACKEND=keychain "$ACCT" "$@"; }
+kc() { PATH="$TMP/bin:$PATH" CLAUDE_HOP_BACKEND=keychain "$HOP" "$@"; }
 kc_token() { python3 -c "
 import binascii, json, os
 raw = open(os.environ['KEYCHAIN_FAKE']).read().strip()
@@ -261,10 +261,10 @@ is "keychain backend reports itself" "$(kc doctor --json 2>/dev/null | python3 -
 # credentials must come back. Driven in-process: it needs a tty and a `claude`,
 # and faking both with a pty hangs on some platforms.
 add_with() {  # add_with <python body for the fake `claude` run>
-  ACCT="$ACCT" FAKE_CLAUDE="$1" python3 - <<'PY' >/dev/null 2>&1
+  HOP="$HOP" FAKE_CLAUDE="$1" python3 - <<'PY' >/dev/null 2>&1
 import importlib.machinery, importlib.util, json, os, sys
 
-loader = importlib.machinery.SourceFileLoader("ca", os.environ["ACCT"])
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
 ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
 loader.exec_module(ca)
 
@@ -300,9 +300,9 @@ is "the account we were on was saved first"   "$(saved_token alpha)" "tok-A"
 # --- 13. unit checks on the tricky helpers ------------------------------------
 unit() {  # unit <name> <python expression> <expected>
   local got
-  got="$(ACCT="$ACCT" python3 - "$2" <<'PY'
+  got="$(HOP="$HOP" python3 - "$2" <<'PY'
 import importlib.machinery, importlib.util, os, sys, time
-loader = importlib.machinery.SourceFileLoader("ca", os.environ["ACCT"])
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
 spec = importlib.util.spec_from_loader("ca", loader)
 ca = importlib.util.module_from_spec(spec)
 loader.exec_module(ca)
@@ -327,6 +327,28 @@ unit "an auto-name keeps a normal address intact" \
      "ca.slug('Some.Body+tag@example.com')" "some.body-tag"
 unit "column widths ignore colour escapes" \
      "ca.visible_len('\033[32mabc\033[0m')" "3"
+
+# --- 14. the pre-1.2.0 environment variable names still work ------------------
+seed
+out="$(env -u CLAUDE_HOP_OFFLINE -u CLAUDE_HOP_BACKEND \
+       CLAUDE_ACCT_OFFLINE=1 CLAUDE_ACCT_BACKEND=file "$HOP" doctor --json 2>/dev/null)"
+is "legacy CLAUDE_ACCT_BACKEND is honoured" \
+   "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["backend"])')" "file"
+
+# --- 15. install.sh upgrades a claude-acct install in place -------------------
+rc="$TMP/rc"
+printf 'export FOO=1\n\n# Claude Code account switcher — `claude-acct`\n[ -f "$HOME/.claude/claude-acct.sh" ] && source "$HOME/.claude/claude-acct.sh"\n\nexport BAR=2\n' > "$rc"
+mkdir -p "$TMP/cfg/bin"; touch "$TMP/cfg/bin/claude-acct" "$TMP/cfg/claude-acct.sh"
+CLAUDE_CONFIG_DIR="$TMP/cfg" "$ROOT/install.sh" --rc "$rc" >/dev/null 2>&1
+is "upgrade leaves exactly one source line" "$(grep -c 'claudehop.sh' "$rc")" "1"
+[ ! -e "$TMP/cfg/bin/claude-acct" ] && [ ! -e "$TMP/cfg/claude-acct.sh" ] \
+  && ok "upgrade removes the old binary and glue" || bad "upgrade removes the old binary and glue" "$(ls "$TMP/cfg/bin" "$TMP/cfg")"
+grep -q 'claude-acct' "$rc" && bad "upgrade refreshes the stale comment" "$(grep claude-acct "$rc")" \
+  || ok "upgrade refreshes the stale comment"
+is "upgrade keeps the user's own lines" "$(grep -c 'export BAR=2' "$rc")" "1"
+CLAUDE_CONFIG_DIR="$TMP/cfg" "$ROOT/install.sh" --uninstall --rc "$rc" >/dev/null 2>&1
+is "uninstall removes our line"  "$(grep -c 'claudehop' "$rc")" "0"
+is "uninstall keeps the rest"    "$(grep -c 'export' "$rc")" "2"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

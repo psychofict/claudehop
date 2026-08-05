@@ -3,9 +3,24 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [1.2.0] — 2026-08-05
+
+### Changed
+
+- **Renamed to `claudehop`.** The command is `claudehop`, with `hop` as a shell
+  alias. `claude-acct` and `cacct` keep working as shell functions, so nothing
+  you have typed before breaks.
+- Environment variables are now `CLAUDE_HOP_BACKEND`, `CLAUDE_HOP_OFFLINE` and
+  `CLAUDE_HOP_TIMEOUT`. The old `CLAUDE_ACCT_*` names are still honoured.
+  `CLAUDE_CONFIG_DIR` and `CLAUDE_ACCOUNTS_DIR` are unchanged.
+
+Your saved accounts do not move: they stay in `~/.claude/accounts/`, and
+`install.sh` removes the old `claude-acct` binary and glue so you never end up
+with two copies on your PATH.
+
 ## [1.1.0] — 2026-08-05
 
-First public release.
+First public release, under the name `claude-acct`.
 
 ### Added
 

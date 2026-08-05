@@ -1,17 +1,17 @@
-# claude-acct
+# claudehop
 
-Switch Claude Code between several Claude accounts without logging in again.
+Hop Claude Code between several Claude accounts without logging in again.
 
-[![CI](https://github.com/psychofict/claude-acct/actions/workflows/ci.yml/badge.svg)](https://github.com/psychofict/claude-acct/actions/workflows/ci.yml)
+[![CI](https://github.com/psychofict/claudehop/actions/workflows/ci.yml/badge.svg)](https://github.com/psychofict/claudehop/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 
 ```
-$ claude-acct
-   NAME  EMAIL              PLAN  TOKEN    SAVED
-   home  me@gmail.com       max   5h left  2026-08-03
-*  work  me@company.com     team  7h left  2026-08-03
+$ hop
+   NAME  EMAIL           PLAN  TOKEN    SAVED
+   home  me@gmail.com    max   5h left  2026-08-03
+*  work  me@company.com  team  7h left  2026-08-03
 
-$ claude-acct home
+$ hop home
 switched to home (me@gmail.com, max)
 ```
 
@@ -24,8 +24,8 @@ from a package registry.
 ## Install
 
 ```bash
-git clone https://github.com/psychofict/claude-acct.git
-cd claude-acct
+git clone https://github.com/psychofict/claudehop.git
+cd claudehop
 ./install.sh          # symlinks into ~/.claude, adds one line to your rc file
 ```
 
@@ -40,17 +40,17 @@ Requires Python 3.9+ and Claude Code. Linux and macOS.
 ## Use
 
 ```bash
-claude-acct                  # list saved accounts, * marks the active one
-claude-acct add work         # log in as a new account and save it
-claude-acct use work         # switch — or just: claude-acct work
-claude-acct whoami           # who am I right now (asks the API)
-claude-acct active           # just the active account name, no network
-claude-acct list --verify    # check every saved token against the API
-claude-acct save <name>      # save the current login under a name
-claude-acct sync             # push the live login back into its saved file
-claude-acct rm <name>        # delete a saved account (does not log you out)
-claude-acct rename <a> <b>
-claude-acct doctor           # check the setup; --fix repairs what it can
+claudehop                  # list saved accounts, * marks the active one
+claudehop add work         # log in as a new account and save it
+claudehop use work         # switch — or just: claudehop work
+claudehop whoami           # who am I right now (asks the API)
+claudehop active           # just the active account name, no network
+claudehop list --verify    # check every saved token against the API
+claudehop save <name>      # save the current login under a name
+claudehop sync             # push the live login back into its saved file
+claudehop rm <name>        # delete a saved account (does not log you out)
+claudehop rename <a> <b>
+claudehop doctor           # check the setup; --fix repairs what it can
 ```
 
 `--json` on `list`, `whoami`, `active` and `doctor` gives machine-readable
@@ -58,7 +58,7 @@ output with no secrets in it, for scripts and statuslines.
 
 Adding an account runs `claude` for you so you can `/login`; on exit it saves
 whatever credentials that produced. If you already logged in by hand, just
-`claude-acct save <name>`. If the login produces nothing — you changed your mind,
+`claudehop save <name>`. If the login produces nothing — you changed your mind,
 you hit Ctrl-C — your previous credentials are put back.
 
 ## How it works
@@ -75,7 +75,7 @@ alone, so switching accounts doesn't sign you out of anything else.
 | macOS | login keychain item `Claude Code-credentials`, falling back to the file |
 
 The backend is detected from whichever one currently holds a login. Force it
-with `CLAUDE_ACCT_BACKEND=file` or `=keychain` if you need to.
+with `CLAUDE_HOP_BACKEND=file` or `=keychain` if you need to.
 
 Nothing else needs patching. Account identity in `~/.claude.json`
 (`oauthAccount`) is re-fetched from the API by Claude Code at startup: put a
@@ -83,7 +83,7 @@ bogus email in there, start a session, and it comes back corrected. So swapping
 the credential is the whole job.
 
 Identity, plan and token checks come from `GET /api/oauth/profile` with the
-account's own bearer token. Set `CLAUDE_ACCT_OFFLINE=1` to skip every API call.
+account's own bearer token. Set `CLAUDE_HOP_OFFLINE=1` to skip every API call.
 
 ### Two details that make or break it
 
@@ -104,7 +104,7 @@ get back to a session you'd otherwise have to re-authenticate.
 
 - Switching affects **new** `claude` processes. Sessions already running keep the
   account they started with, and will rewrite the credential store when their
-  token refreshes — which can silently undo a switch. `claude-acct` prints the
+  token refreshes — which can silently undo a switch. `claudehop` prints the
   PIDs it finds; quit them for a clean switch.
 - `/login` opens your default browser, which is already signed in as somebody.
   Paste the URL into an incognito window to authenticate as a different account.
@@ -141,11 +141,11 @@ for the threat model and how to report a problem.
 ## Files
 
 ```
-bin/claude-acct              the tool (python3, stdlib only)
-shell/claude-acct.sh         PATH, tab-completion, back-compat aliases
+bin/claudehop              the tool (python3, stdlib only)
+shell/claudehop.sh           PATH, tab-completion, back-compat aliases
 extras/statusline-snippet.sh show the active account in the Claude Code statusline
 install.sh                   symlink/copy into ~/.claude, wire up the rc file
-test/test-switch.sh          55 checks against a throwaway config dir, no network
+test/test-switch.sh          62 checks against a throwaway config dir, no network
 ```
 
 ## Tests
