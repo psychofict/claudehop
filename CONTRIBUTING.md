@@ -23,7 +23,7 @@ Thanks for looking. This is a small tool and it intends to stay small.
 git clone https://github.com/psychofict/claude-acct.git
 cd claude-acct
 ./install.sh              # symlinks, so your edits are live immediately
-./test/test-switch.sh     # 51 checks, about two seconds
+./test/test-switch.sh     # 55 checks, about two seconds
 ```
 
 Before opening a pull request:

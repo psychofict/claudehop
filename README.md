@@ -145,7 +145,7 @@ bin/claude-acct              the tool (python3, stdlib only)
 shell/claude-acct.sh         PATH, tab-completion, back-compat aliases
 extras/statusline-snippet.sh show the active account in the Claude Code statusline
 install.sh                   symlink/copy into ~/.claude, wire up the rc file
-test/test-switch.sh          51 checks against a throwaway config dir, no network
+test/test-switch.sh          55 checks against a throwaway config dir, no network
 ```
 
 ## Tests
