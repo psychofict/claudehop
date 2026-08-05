@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: compile
-        run: python3 -m py_compile bin/claude-acct
+        run: python3 -m py_compile bin/claudehop
       - name: test
         run: ./test/test-switch.sh
 
@@ -39,17 +39,24 @@ jobs:
           python-version: "3.13"
       - run: pip install ruff
       - name: ruff
-        run: ruff check --select=E,F,W,B,UP --line-length=110 --target-version=py39 bin/claude-acct
+        run: ruff check --select=E,F,W,B,UP --line-length=110 --target-version=py39 bin/claudehop
       - name: shellcheck
-        run: shellcheck -S warning install.sh shell/claude-acct.sh test/test-switch.sh
+        run: shellcheck -S warning install.sh shell/claudehop.sh test/test-switch.sh
       - name: install and uninstall cleanly
         run: |
           set -euo pipefail
           export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/claude"
-          printf 'export FOO=1\n' > "$RUNNER_TEMP/rc"
+          # start from a pre-1.2.0 install: the old glue line and the old binary
+          printf 'export FOO=1\n[ -f "$HOME/.claude/claude-acct.sh" ] && source "$HOME/.claude/claude-acct.sh"\n' > "$RUNNER_TEMP/rc"
+          mkdir -p "$CLAUDE_CONFIG_DIR/bin"
+          touch "$CLAUDE_CONFIG_DIR/bin/claude-acct" "$CLAUDE_CONFIG_DIR/claude-acct.sh"
           ./install.sh --rc "$RUNNER_TEMP/rc"
-          grep -q 'claude-acct.sh' "$RUNNER_TEMP/rc"
-          ./install.sh --rc "$RUNNER_TEMP/rc"          # idempotent
-          test "$(grep -c 'claude-acct.sh' "$RUNNER_TEMP/rc")" = 1
+          grep -q 'claudehop.sh' "$RUNNER_TEMP/rc"
+          test "$(grep -c 'source' "$RUNNER_TEMP/rc")" = 1     # replaced, not stacked
+          test ! -e "$CLAUDE_CONFIG_DIR/bin/claude-acct"       # old binary removed
+          test -x "$CLAUDE_CONFIG_DIR/bin/claudehop"
+          ./install.sh --rc "$RUNNER_TEMP/rc"                  # idempotent
+          test "$(grep -c 'claudehop.sh' "$RUNNER_TEMP/rc")" = 1
           ./install.sh --uninstall --rc "$RUNNER_TEMP/rc"
-          ! grep -q 'claude-acct.sh' "$RUNNER_TEMP/rc"
+          ! grep -q 'claudehop.sh' "$RUNNER_TEMP/rc"
+          test ! -e "$CLAUDE_CONFIG_DIR/bin/claudehop"

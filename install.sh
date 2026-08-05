@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install claude-acct into ~/.claude and wire it into your shell.
+# Install claudehop into ~/.claude and wire it into your shell.
 #
 #   ./install.sh              symlink from this repo (edits here take effect at once)
 #   ./install.sh --copy       copy the files instead
@@ -10,9 +10,18 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-BIN="$CLAUDE_DIR/bin/claude-acct"
-GLUE="$CLAUDE_DIR/claude-acct.sh"
-LEGACY_GLUE="$CLAUDE_DIR/account-switcher.sh"
+BIN="$CLAUDE_DIR/bin/claudehop"
+GLUE="$CLAUDE_DIR/claudehop.sh"
+
+# Names this tool has been installed under before. Removed on install and on
+# uninstall so an upgrade never leaves two copies on your PATH.
+LEGACY=(
+  "$CLAUDE_DIR/bin/claude-acct"
+  "$CLAUDE_DIR/claude-acct.sh"
+  "$CLAUDE_DIR/account-switcher.sh"
+)
+# Any of these in an rc file is our line, whatever version wrote it.
+RC_MARKERS=(claudehop.sh claude-acct.sh account-switcher.sh)
 
 MODE="link"
 RC=""
@@ -31,7 +40,7 @@ while [ $# -gt 0 ]; do
 done
 
 command -v python3 >/dev/null 2>&1 || {
-  echo "claude-acct needs python3 on your PATH." >&2; exit 1; }
+  echo "claudehop needs python3 on your PATH." >&2; exit 1; }
 
 # Guess the rc file. bash on macOS reads .bash_profile for login shells, which
 # is what Terminal.app starts, so prefer that when it already exists.
@@ -54,45 +63,68 @@ if [ -z "$RC" ] && [ "$NO_RC" = 0 ]; then
   NO_RC=1
 fi
 
-SOURCE_LINE='[ -f "$HOME/.claude/claude-acct.sh" ] && source "$HOME/.claude/claude-acct.sh"'
+COMMENT_LINE='# claudehop — Claude Code account switcher'
+SOURCE_LINE='[ -f "$HOME/.claude/claudehop.sh" ] && source "$HOME/.claude/claudehop.sh"'
+# Comment lines we have written into rc files over the versions. Recognised so
+# an upgrade refreshes ours instead of leaving one that names the old tool.
+OUR_COMMENTS='# claudehop|# claude-acct|# Claude Code account switcher'
+
+rc_has_our_line() {  # rc_has_our_line <file>
+  [ -f "$1" ] || return 1
+  local m
+  for m in "${RC_MARKERS[@]}"; do
+    grep -q -- "$m" "$1" && return 0
+  done
+  return 1
+}
 
 # Line edits go through python, not sed: the source line contains `&&`, and `&`
 # in a sed replacement means "the whole match" — which silently duplicates the
 # line it was meant to replace. (BSD and GNU sed also disagree on -i.)
-rc_edit() {  # rc_edit <rc file> <drop|replace> <line>
+rc_edit() {  # rc_edit <rc file> <drop|replace> <block> <comment prefixes> <marker>...
   python3 - "$@" <<'PY'
 import shutil, sys
-rc, mode, line = sys.argv[1], sys.argv[2], sys.argv[3]
+rc, mode, block = sys.argv[1], sys.argv[2], sys.argv[3]
+comments, markers = sys.argv[4].split("|"), sys.argv[5:]
 try:
     src = open(rc).read().splitlines()
 except FileNotFoundError:
     src = []
-def hit(s):
-    if "claude-acct.sh" in s or "account-switcher.sh" in s:
-        return True
-    return mode == "drop" and s.strip().startswith("# claude-acct")
+
+def ours(s):
+    """One of our lines: the source line, or a comment we wrote above it."""
+    return any(m in s for m in markers) or s.strip().startswith(tuple(comments))
 
 out, replaced = [], False
 for s in src:
-    if not hit(s):
+    if not ours(s):
         out.append(s)
     elif mode == "replace" and not replaced:
-        out.append(line)
+        out.extend(block.splitlines())
         replaced = True
+if mode == "drop":
+    # Removing our block leaves the blank line that separated it; don't grow a
+    # gap in someone's rc file every time they reinstall.
+    collapsed = []
+    for s in out:
+        if not s.strip() and collapsed and not collapsed[-1].strip():
+            continue
+        collapsed.append(s)
+    out = collapsed
 while out and not out[-1].strip():
     out.pop()
 if src:
-    shutil.copy2(rc, rc + ".pre-claude-acct.bak")
+    shutil.copy2(rc, rc + ".pre-claudehop.bak")
 open(rc, "w").write("\n".join(out) + "\n")
 print("replaced" if replaced else "dropped")
 PY
 }
 
 if [ "$UNINSTALL" = 1 ]; then
-  rm -f "$BIN" "$GLUE"
-  if [ "$NO_RC" = 0 ] && [ -f "$RC" ] && grep -q -e 'claude-acct.sh' -e 'account-switcher.sh' "$RC"; then
-    rc_edit "$RC" drop "" >/dev/null
-    echo "cleaned $RC (backup at $RC.pre-claude-acct.bak)"
+  rm -f "$BIN" "$GLUE" "${LEGACY[@]}"
+  if [ "$NO_RC" = 0 ] && rc_has_our_line "$RC"; then
+    rc_edit "$RC" drop "" "$OUR_COMMENTS" "${RC_MARKERS[@]}" >/dev/null
+    echo "cleaned $RC (backup at $RC.pre-claudehop.bak)"
   fi
   echo "uninstalled. Your saved accounts in $CLAUDE_DIR/accounts are untouched."
   exit 0
@@ -103,21 +135,24 @@ install_one() {  # src dst
   rm -f "$2"
   if [ "$MODE" = copy ]; then cp "$1" "$2"; else ln -s "$1" "$2"; fi
 }
-chmod 755 "$ROOT/bin/claude-acct"
-install_one "$ROOT/bin/claude-acct" "$BIN"
-install_one "$ROOT/shell/claude-acct.sh" "$GLUE"
+chmod 755 "$ROOT/bin/claudehop"
+install_one "$ROOT/bin/claudehop" "$BIN"
+install_one "$ROOT/shell/claudehop.sh" "$GLUE"
+# The old command name keeps working as a shell function from the glue, so the
+# stale binary and glue from a claude-acct install just go.
+rm -f "${LEGACY[@]}"
 
 if [ "$NO_RC" = 0 ]; then
   # Exactly one source line in the rc file, whatever state it was in: a stale
-  # account-switcher.sh line from an older install gets replaced, not stacked.
-  if [ -f "$RC" ] && grep -q -e 'claude-acct.sh' -e 'account-switcher.sh' "$RC"; then
-    rc_edit "$RC" replace "$SOURCE_LINE" >/dev/null
-    echo "updated the source line in $RC (backup at $RC.pre-claude-acct.bak)"
-    [ -L "$LEGACY_GLUE" ] && rm -f "$LEGACY_GLUE"
+  # claude-acct.sh line from an older install gets replaced, not stacked.
+  if rc_has_our_line "$RC"; then
+    rc_edit "$RC" replace "$COMMENT_LINE
+$SOURCE_LINE" "$OUR_COMMENTS" "${RC_MARKERS[@]}" >/dev/null
+    echo "updated the source line in $RC (backup at $RC.pre-claudehop.bak)"
   else
     {
       echo
-      echo '# claude-acct — Claude Code account switcher'
+      echo "$COMMENT_LINE"
       echo "$SOURCE_LINE"
     } >> "$RC"
     echo "added the source line to $RC"
@@ -130,11 +165,11 @@ fi
 
 echo
 echo "installed:"
-echo "  $BIN$([ "$MODE" = link ] && echo "  ->  $ROOT/bin/claude-acct")"
-echo "  $GLUE$([ "$MODE" = link ] && echo "  ->  $ROOT/shell/claude-acct.sh")"
+echo "  $BIN$([ "$MODE" = link ] && echo "  ->  $ROOT/bin/claudehop")"
+echo "  $GLUE$([ "$MODE" = link ] && echo "  ->  $ROOT/shell/claudehop.sh")"
 echo
 if [ "$NO_RC" = 0 ]; then
-  echo "Open a new terminal, then:  claude-acct"
+  echo "Open a new terminal, then:  claudehop     (or just: hop)"
 else
   echo "Run it with:  $BIN"
 fi

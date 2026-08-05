@@ -13,12 +13,12 @@ What the tool does about that:
   re-tightened on every run if something loosened them.
 - Writes are atomic — a new file with the right mode, `fsync`, then `rename` —
   so a crash mid-write cannot leave a half-written or world-readable credential.
-- No `.bak` copies of profiles are kept. `claude-acct doctor --fix` removes any
+- No `.bak` copies of profiles are kept. `claudehop doctor --fix` removes any
   left by an older version.
 - Tokens never appear in `--json` output, in log lines, or in any error message.
 - The only network call is `GET https://api.anthropic.com/api/oauth/profile`
   with the account's own bearer token, to resolve an email and plan.
-  `CLAUDE_ACCT_OFFLINE=1` disables it.
+  `CLAUDE_HOP_OFFLINE=1` disables it.
 
 ## Known limits
 
@@ -36,6 +36,6 @@ What the tool does about that:
 
 ## Reporting a vulnerability
 
-Open a [security advisory](https://github.com/psychofict/claude-acct/security/advisories/new)
+Open a [security advisory](https://github.com/psychofict/claudehop/security/advisories/new)
 on the repository. Please don't file a public issue for anything that could
 expose credentials. Expect a first reply within a week.

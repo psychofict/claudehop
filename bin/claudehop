@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""claude-acct - switch Claude Code between several Claude accounts.
+"""claudehop - hop Claude Code between several Claude accounts.
 
 How it works: Claude Code keeps the live login under the "claudeAiOauth" key of
 its credential store - ~/.claude/.credentials.json on Linux, the login keychain
@@ -12,17 +12,17 @@ startup, so nothing else needs patching - start a new `claude` and it is the
 other account.
 
 Commands:
-  claude-acct                    list saved accounts (same as `list`)
-  claude-acct <name>             shorthand for `use <name>`
-  claude-acct use <name>         switch to that account
-  claude-acct save [name]        save the current login as <name>
-  claude-acct add [name]         log in as a new account and save it
-  claude-acct whoami             who is logged in right now (asks the API)
-  claude-acct active             print the active account name (no network)
-  claude-acct sync               copy the live login back into its saved file
-  claude-acct rm <name>          delete a saved account
-  claude-acct rename <old> <new>
-  claude-acct doctor [--fix]     check the setup and report anything odd
+  claudehop                    list saved accounts (same as `list`)
+  claudehop <name>             hop to that account (shorthand for `use`)
+  claudehop use <name>         same thing, spelled out
+  claudehop save [name]        save the current login as <name>
+  claudehop add [name]         log in as a new account and save it
+  claudehop whoami             who is logged in right now (asks the API)
+  claudehop active             print the active account name (no network)
+  claudehop sync               copy the live login back into its saved file
+  claudehop rm <name>          delete a saved account
+  claudehop rename <old> <new>
+  claudehop doctor [--fix]     check the setup and report anything odd
 
 Flags:
   -y, --yes        never prompt
@@ -35,8 +35,8 @@ Flags:
 Environment:
   CLAUDE_CONFIG_DIR      where Claude Code keeps its config (default ~/.claude)
   CLAUDE_ACCOUNTS_DIR    where saved accounts live (default <config>/accounts)
-  CLAUDE_ACCT_BACKEND    auto (default) | file | keychain
-  CLAUDE_ACCT_OFFLINE=1  never call the API
+  CLAUDE_HOP_BACKEND     auto (default) | file | keychain
+  CLAUDE_HOP_OFFLINE=1   never call the API
 """
 
 from __future__ import annotations
@@ -51,12 +51,27 @@ import subprocess
 import sys
 import time
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
+PROG = "claudehop"
+
+
+def env(*names: str) -> str | None:
+    """First of these environment variables that is set and non-empty.
+
+    The tool was called claude-acct before 1.2.0, so the old CLAUDE_ACCT_*
+    names are still honoured everywhere the new ones are.
+    """
+    for n in names:
+        v = os.environ.get(n)
+        if v:
+            return v
+    return None
+
 
 HOME = os.path.expanduser("~")
-CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+CLAUDE_DIR = env("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
 CREDS = os.path.join(CLAUDE_DIR, ".credentials.json")
-ACCOUNTS = os.environ.get("CLAUDE_ACCOUNTS_DIR") or os.path.join(CLAUDE_DIR, "accounts")
+ACCOUNTS = env("CLAUDE_ACCOUNTS_DIR") or os.path.join(CLAUDE_DIR, "accounts")
 ACTIVE_PTR = os.path.join(ACCOUNTS, "active")
 LOCK_PATH = os.path.join(ACCOUNTS, ".lock")
 PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
@@ -65,7 +80,11 @@ PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 OAUTH_KEY = "claudeAiOauth"
-API_TIMEOUT = float(os.environ.get("CLAUDE_ACCT_TIMEOUT") or 10.0)
+API_TIMEOUT = float(env("CLAUDE_HOP_TIMEOUT", "CLAUDE_ACCT_TIMEOUT") or 10.0)
+OFFLINE = bool(env("CLAUDE_HOP_OFFLINE", "CLAUDE_ACCT_OFFLINE"))
+
+# Temp files this tool writes; the second is what versions before 1.2.0 left.
+TMP_MARKERS = (".tmp-claudehop", ".tmp-claude-acct")
 
 USAGE_EXIT = 2
 
@@ -120,7 +139,7 @@ def read_json(path: str) -> dict:
 
 def write_json_secure(path: str, data: dict, keep_backup: bool = False):
     """Atomic, 0600, fsynced. Optionally keeps a .bak of the previous file."""
-    tmp = f"{path}.tmp-claude-acct.{os.getpid()}"
+    tmp = f"{path}{TMP_MARKERS[0]}.{os.getpid()}"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w") as f:
@@ -227,16 +246,16 @@ class KeychainStore:
 
 
 def pick_store():
-    want = (os.environ.get("CLAUDE_ACCT_BACKEND") or "auto").lower()
+    want = (env("CLAUDE_HOP_BACKEND", "CLAUDE_ACCT_BACKEND") or "auto").lower()
     file_store = FileStore()
     if want == "file":
         return file_store
     if want == "keychain":
         if not shutil.which("security"):
-            die("CLAUDE_ACCT_BACKEND=keychain but the `security` command is not available.")
+            die("CLAUDE_HOP_BACKEND=keychain but the `security` command is not available.")
         return KeychainStore()
     if want != "auto":
-        die(f"CLAUDE_ACCT_BACKEND must be auto, file or keychain (got {want!r})")
+        die(f"CLAUDE_HOP_BACKEND must be auto, file or keychain (got {want!r})")
     if sys.platform != "darwin" or not shutil.which("security"):
         return file_store
     kc = KeychainStore()
@@ -270,7 +289,7 @@ def clear_live_oauth():
 
 # ---------------------------------------------------------------------- lock
 #
-# Two `claude-acct` runs at once could interleave read-modify-write on the same
+# Two `claudehop` runs at once could interleave read-modify-write on the same
 # credential store and lose an account. Cheap to prevent.
 
 try:
@@ -292,7 +311,7 @@ class _Lock:
         try:
             fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            info(f"{DIM}waiting for another claude-acct to finish...{OFF}")
+            info(f"{DIM}waiting for another {PROG} to finish...{OFF}")
             fcntl.flock(self.fd, fcntl.LOCK_EX)
         return self
 
@@ -421,7 +440,7 @@ def api_profile(token: str, timeout: float = API_TIMEOUT) -> tuple[int, dict]:
             "Authorization": f"Bearer {token}",
             "anthropic-beta": "oauth-2025-04-20",
             "Content-Type": "application/json",
-            "User-Agent": f"claude-acct/{VERSION}",
+            "User-Agent": f"{PROG}/{VERSION}",
         },
     )
     try:
@@ -441,7 +460,7 @@ def identity(block: dict) -> dict:
     tok = block.get("accessToken")
     if not tok:
         return {}
-    if os.environ.get("CLAUDE_ACCT_OFFLINE"):
+    if OFFLINE:
         return {"tokenState": "not checked"}
     if tok not in _IDENT_CACHE:
         _IDENT_CACHE[tok] = _identity_uncached(tok)
@@ -478,7 +497,7 @@ def _identity_uncached(tok: str) -> dict:
 def identify_many(blocks: dict[str, dict]) -> dict[str, dict]:
     """identity() for several accounts at once - one API round trip of latency."""
     todo = {n: b for n, b in blocks.items() if b.get("accessToken")}
-    if len(todo) < 2 or os.environ.get("CLAUDE_ACCT_OFFLINE"):
+    if len(todo) < 2 or OFFLINE:
         return {n: identity(b) for n, b in blocks.items()}
     from concurrent.futures import ThreadPoolExecutor
 
@@ -535,7 +554,7 @@ def refresh_warning(block: dict) -> str | None:
     if left is None:
         return None
     if left <= 0:
-        return "refresh token expired - this account needs `claude-acct add` again"
+        return f"refresh token expired - this account needs `{PROG} add` again"
     if left < 7 * 86400:
         return f"refresh token expires in {humanise(left)}"
     return None
@@ -636,9 +655,9 @@ def cmd_list(verify=False, as_json=False, **_):
     if not names and not as_json:
         info("No accounts saved yet.")
         if live:
-            info("You are logged in - save this one with:  claude-acct save <name>")
+            info(f"You are logged in - save this one with:  {PROG} save <name>")
         else:
-            info("Log in with:  claude-acct add <name>")
+            info(f"Log in with:  {PROG} add <name>")
         return
 
     profiles = {n: load_profile(n) for n in names}
@@ -711,7 +730,7 @@ def cmd_list(verify=False, as_json=False, **_):
     if cur is None and live:
         info(
             f"\n{YELLOW}note:{OFF} the current login does not match any saved account. "
-            f"Save it with:  claude-acct save <name>"
+            f"Save it with:  {PROG} save <name>"
         )
 
 
@@ -790,18 +809,18 @@ def cmd_sync(**_):
         die("not logged in - nothing to sync.")
     n = active_name(check_api=True)
     if not n:
-        die("current login is not one of the saved accounts. Use `claude-acct save <name>`.")
+        die(f"current login is not one of the saved accounts. Use `{PROG} save <name>`.")
     save_profile(n, live, {})
     print(f"synced live login into {n}")
 
 
 def cmd_use(name=None, yes=False, no_sync=False, **_):
     if not name:
-        die("usage: claude-acct use <name>", USAGE_EXIT)
+        die(f"usage: {PROG} use <name>", USAGE_EXIT)
     target = load_profile(name)
     blk = target.get(OAUTH_KEY)
     if not blk:
-        die(f"'{name}' has no saved credentials. Re-save it with `claude-acct add {name}`.")
+        die(f"'{name}' has no saved credentials. Re-save it with `{PROG} add {name}`.")
 
     live = live_oauth()
     if live and live.get("accessToken") == blk.get("accessToken"):
@@ -827,14 +846,14 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
 
 def cmd_add(name=None, yes=False, **_):
     if not name:
-        die("usage: claude-acct add <name>", USAGE_EXIT)
+        die(f"usage: {PROG} add <name>", USAGE_EXIT)
     check_name(name)
     if os.path.exists(profile_path(name)) and not confirm(f"'{name}' already exists - replace it?", yes):
         die("aborted")
     if not shutil.which("claude"):
         die("`claude` is not on your PATH, so I can't drive the login. Install Claude Code first.")
     if not sys.stdin.isatty():
-        die("adding an account needs a terminal - run `claude-acct add " + name + "` from one.")
+        die(f"adding an account needs a terminal - run `{PROG} add {name}` from one.")
 
     live = live_oauth()
     if live:
@@ -872,7 +891,7 @@ def cmd_add(name=None, yes=False, **_):
 
 def cmd_rm(name=None, yes=False, **_):
     if not name:
-        die("usage: claude-acct rm <name>", USAGE_EXIT)
+        die(f"usage: {PROG} rm <name>", USAGE_EXIT)
     load_profile(name)  # existence check
     if name == active_name():
         info(
@@ -891,7 +910,7 @@ def cmd_rm(name=None, yes=False, **_):
 
 def cmd_rename(name=None, new=None, **_):
     if not name or not new:
-        die("usage: claude-acct rename <old> <new>", USAGE_EXIT)
+        die(f"usage: {PROG} rename <old> <new>", USAGE_EXIT)
     check_name(new)
     data = load_profile(name)
     if os.path.exists(profile_path(new)):
@@ -949,7 +968,7 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
         stale = [
             os.path.join(ACCOUNTS, f)
             for f in os.listdir(ACCOUNTS)
-            if ".tmp-claude-acct" in f or f.endswith(".json.bak")
+            if any(m in f for m in TMP_MARKERS) or f.endswith(".json.bak")
         ]
     for f in stale:
         if fix:
@@ -962,7 +981,7 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
     if ptr and ptr not in names:
         note("error", f"active pointer names '{ptr}', which is not a saved account")
     if live and active_name(check_api=verify) is None:
-        note("warn", "the live login does not match any saved account; `claude-acct save <name>`")
+        note("warn", f"the live login does not match any saved account; `{PROG} save <name>`")
     if not live:
         note("warn", "not logged in right now")
 
@@ -995,7 +1014,7 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
             )
         )
     else:
-        print(f"{BOLD}claude-acct {VERSION}{OFF}")
+        print(f"{BOLD}{PROG} {VERSION}{OFF}")
         print(f"  backend      {STORE.name} ({STORE.where})")
         print(f"  config dir   {CLAUDE_DIR}")
         print(f"  accounts     {ACCOUNTS} ({len(names)} saved)")
@@ -1016,7 +1035,7 @@ def cmd_help(**_):
 
 
 def cmd_version(**_):
-    print(f"claude-acct {VERSION}")
+    print(f"{PROG} {VERSION}")
 
 
 COMMANDS = {
@@ -1060,20 +1079,20 @@ def main(argv: list[str]):
         elif a in FLAGS:
             flags[FLAGS[a]] = True
         elif a.startswith("-") and a not in COMMANDS:
-            die(f"unknown option '{a}'. Try: claude-acct help", USAGE_EXIT)
+            die(f"unknown option '{a}'. Try: {PROG} help", USAGE_EXIT)
         else:
             args.append(a)
 
     cmd = args[0] if args else "list"
     fn = COMMANDS.get(cmd)
     if not fn:
-        # `claude-acct eben` is a shortcut for `claude-acct use eben`
+        # `claudehop work` is a shortcut for `claudehop use work`
         if VALID_NAME.match(cmd) and os.path.exists(profile_path(cmd)):
             fn, args = cmd_use, ["use", cmd]
         else:
             known = ", ".join(list_profiles())
             hint = f" Saved accounts: {known}." if known else ""
-            die(f"unknown command '{cmd}'. Try: claude-acct help{hint}", USAGE_EXIT)
+            die(f"unknown command '{cmd}'. Try: {PROG} help{hint}", USAGE_EXIT)
     if len(args) > 3:
         die(f"too many arguments for '{cmd}'", USAGE_EXIT)
 
@@ -1109,7 +1128,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         code = 130
     except BrokenPipeError:
-        # `claude-acct list | head` — say nothing, leave no traceback.
+        # `claudehop list | head` — say nothing, leave no traceback.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         code = 0
     sys.exit(code)

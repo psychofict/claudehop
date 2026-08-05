@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         **Never paste a token, a credential file, or the contents of
-        `~/.claude/accounts/`.** `claude-acct doctor` prints no secrets — it is
+        `~/.claude/accounts/`.** `claudehop doctor` prints no secrets — it is
         safe to paste.
   - type: textarea
     id: what
@@ -14,14 +14,14 @@ body:
       label: What happened
       description: What you ran, what you expected, what you got.
       placeholder: |
-        $ claude-acct use work
+        $ hop work
         ...
     validations:
       required: true
   - type: textarea
     id: doctor
     attributes:
-      label: Output of `claude-acct doctor`
+      label: Output of `claudehop doctor`
       render: text
     validations:
       required: true

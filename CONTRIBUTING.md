@@ -5,7 +5,7 @@ Thanks for looking. This is a small tool and it intends to stay small.
 ## The rules that keep it small
 
 1. **Python 3.9+, standard library only.** No dependencies, no build step, no
-   package registry. `bin/claude-acct` must stay a single file you can read in
+   package registry. `bin/claudehop` must stay a single file you can read in
    one sitting and run straight from a clone.
 2. **Never lose a login.** Any code path that replaces the live credential must
    first write what was there into a profile. If you can't identify it, stash it
@@ -20,17 +20,17 @@ Thanks for looking. This is a small tool and it intends to stay small.
 ## Working on it
 
 ```bash
-git clone https://github.com/psychofict/claude-acct.git
-cd claude-acct
+git clone https://github.com/psychofict/claudehop.git
+cd claudehop
 ./install.sh              # symlinks, so your edits are live immediately
-./test/test-switch.sh     # 55 checks, about two seconds
+./test/test-switch.sh     # 62 checks, about two seconds
 ```
 
 Before opening a pull request:
 
 ```bash
 ./test/test-switch.sh
-ruff check bin/claude-acct        # if you have it; CI runs it either way
+ruff check bin/claudehop        # if you have it; CI runs it either way
 shellcheck install.sh shell/*.sh test/*.sh
 ```
 
@@ -43,7 +43,7 @@ pull request.
 - Verification of the macOS keychain backend against a real Mac. It is written
   against Claude Code's own `security` calls and tested through a stand-in, but
   nobody has run it on real hardware yet.
-- fish shell completion (`shell/claude-acct.sh` is POSIX/bash + zsh today).
+- fish shell completion (`shell/claudehop.sh` is POSIX/bash + zsh today).
 - A `--verify` cache so `list --verify` doesn't re-ask the API every time.
 
 ## Style
