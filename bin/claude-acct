@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """claude-acct - switch Claude Code between several Claude accounts.
 
-How it works: Claude Code keeps the live login in ~/.claude/.credentials.json
-under the "claudeAiOauth" key. This tool keeps one saved copy of that block per
-account in ~/.claude/accounts/<name>.json and swaps the active one in and out.
-Everything else in the credentials file (MCP server OAuth) is left untouched.
+How it works: Claude Code keeps the live login under the "claudeAiOauth" key of
+its credential store - ~/.claude/.credentials.json on Linux, the login keychain
+on macOS. This tool keeps one saved copy of that block per account in
+~/.claude/accounts/<name>.json and swaps the active one in and out. Everything
+else in the store (MCP server OAuth) is left untouched.
 
 Account identity (email, plan) is re-fetched from the API by Claude Code on
 startup, so nothing else needs patching - start a new `claude` and it is the
@@ -12,20 +13,36 @@ other account.
 
 Commands:
   claude-acct                    list saved accounts (same as `list`)
+  claude-acct <name>             shorthand for `use <name>`
   claude-acct use <name>         switch to that account
   claude-acct save [name]        save the current login as <name>
   claude-acct add [name]         log in as a new account and save it
   claude-acct whoami             who is logged in right now (asks the API)
+  claude-acct active             print the active account name (no network)
   claude-acct sync               copy the live login back into its saved file
   claude-acct rm <name>          delete a saved account
   claude-acct rename <old> <new>
+  claude-acct doctor [--fix]     check the setup and report anything odd
 
-Flags: -y/--yes (no prompts), --verify (check each token against the API in
-`list`), --no-sync (don't write the live login back before switching).
+Flags:
+  -y, --yes        never prompt
+  --verify         check each saved token against the API (`list`, `doctor`)
+  --no-sync        don't write the live login back before switching
+  --json           machine-readable output (`list`, `whoami`, `active`, `doctor`)
+  --no-color       plain text
+  -V, --version    print the version
+
+Environment:
+  CLAUDE_CONFIG_DIR      where Claude Code keeps its config (default ~/.claude)
+  CLAUDE_ACCOUNTS_DIR    where saved accounts live (default <config>/accounts)
+  CLAUDE_ACCT_BACKEND    auto (default) | file | keychain
+  CLAUDE_ACCT_OFFLINE=1  never call the API
 """
 
 from __future__ import annotations
 
+import binascii
+import getpass
 import json
 import os
 import re
@@ -33,19 +50,39 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
+
+VERSION = "1.1.0"
 
 HOME = os.path.expanduser("~")
 CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
 CREDS = os.path.join(CLAUDE_DIR, ".credentials.json")
 ACCOUNTS = os.environ.get("CLAUDE_ACCOUNTS_DIR") or os.path.join(CLAUDE_DIR, "accounts")
 ACTIVE_PTR = os.path.join(ACCOUNTS, "active")
+LOCK_PATH = os.path.join(ACCOUNTS, ".lock")
 PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+
+# What Claude Code calls its keychain item on macOS.
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+OAUTH_KEY = "claudeAiOauth"
+API_TIMEOUT = float(os.environ.get("CLAUDE_ACCT_TIMEOUT") or 10.0)
+
+USAGE_EXIT = 2
+
+_ANSI = re.compile(r"\033\[[0-9;]*m")
+
+
+def _use_color() -> bool:
+    if "--no-color" in sys.argv or os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("CLICOLOR_FORCE"):
+        return True
+    return sys.stdout.isatty()
+
 
 BOLD, DIM, GREEN, YELLOW, RED, CYAN, OFF = (
     ("\033[1m", "\033[2m", "\033[32m", "\033[33m", "\033[31m", "\033[36m", "\033[0m")
-    if sys.stdout.isatty()
+    if _use_color()
     else ("", "", "", "", "", "", "")
 )
 
@@ -59,7 +96,16 @@ def info(msg: str):
     print(msg, file=sys.stderr)
 
 
-# ---------------------------------------------------------------- credentials
+def visible_len(s: str) -> int:
+    """Width of a string once the colour escapes are stripped."""
+    return len(_ANSI.sub("", s))
+
+
+def pad(s: str, width: int) -> str:
+    return s + " " * max(0, width - visible_len(s))
+
+
+# ------------------------------------------------------------------ json files
 
 
 def read_json(path: str) -> dict:
@@ -72,39 +118,200 @@ def read_json(path: str) -> dict:
         die(f"{path} is not valid JSON ({e}). Refusing to touch it.")
 
 
-def write_json_secure(path: str, data: dict):
-    """Atomic, 0600, keeps a .bak of the previous file."""
-    tmp = path + ".tmp-claude-acct"
+def write_json_secure(path: str, data: dict, keep_backup: bool = False):
+    """Atomic, 0600, fsynced. Optionally keeps a .bak of the previous file."""
+    tmp = f"{path}.tmp-claude-acct.{os.getpid()}"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(data, f, indent=2)
-    if os.path.exists(path):
-        shutil.copy2(path, path + ".bak")
-        os.chmod(path + ".bak", 0o600)
-    os.replace(tmp, path)
-    os.chmod(path, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        if keep_backup and os.path.exists(path):
+            shutil.copy2(path, path + ".bak")
+            os.chmod(path + ".bak", 0o600)
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
+# ------------------------------------------------------------ credential store
+#
+# Two backends. On Linux the live login is a JSON file; on macOS it is normally
+# a generic password in the login keychain, and Claude Code falls back to the
+# file when the keychain is unavailable (ssh, no GUI session). We read and write
+# whichever one currently holds the login so we never split it across both.
+
+
+class FileStore:
+    name = "file"
+
+    def __init__(self, path: str = CREDS):
+        self.path = path
+        self.where = path
+
+    def exists(self) -> bool:
+        return os.path.exists(self.path)
+
+    def read(self) -> dict:
+        return read_json(self.path)
+
+    def write(self, doc: dict):
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        write_json_secure(self.path, doc, keep_backup=True)
+
+
+class KeychainStore:
+    """macOS login keychain, the same item Claude Code writes itself."""
+
+    name = "keychain"
+
+    def __init__(self, service: str = KEYCHAIN_SERVICE, account: str | None = None):
+        self.service = service
+        self.account = account or os.environ.get("USER") or getpass.getuser()
+        self.where = f"keychain item {service!r} (account {self.account})"
+
+    def _security(self, args: list[str]) -> tuple[int, str, str]:
+        p = subprocess.run(
+            ["security", *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return p.returncode, p.stdout, p.stderr
+
+    def exists(self) -> bool:
+        if not shutil.which("security"):
+            return False
+        rc, _, _ = self._security(
+            ["find-generic-password", "-a", self.account, "-s", self.service]
+        )
+        return rc == 0
+
+    def read(self) -> dict:
+        rc, out, err = self._security(
+            ["find-generic-password", "-a", self.account, "-s", self.service, "-w"]
+        )
+        if rc != 0:
+            if "could not be found" in err:
+                return {}
+            die(f"could not read the keychain item: {err.strip() or f'security exited {rc}'}")
+        raw = out.strip()
+        if not raw:
+            return {}
+        # `security` prints the secret as text, but as hex if it is not printable.
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            try:
+                return json.loads(binascii.unhexlify(raw).decode())
+            except Exception:
+                die("the keychain item does not contain the JSON Claude Code expects.")
+
+    def write(self, doc: dict):
+        blob = json.dumps(doc).encode()
+        rc, _, err = self._security(
+            [
+                "add-generic-password",
+                "-U",  # update in place if it already exists
+                "-a", self.account,
+                "-s", self.service,
+                "-X", binascii.hexlify(blob).decode(),
+            ]
+        )
+        if rc != 0:
+            die(f"could not write the keychain item: {err.strip() or f'security exited {rc}'}")
+
+
+def pick_store():
+    want = (os.environ.get("CLAUDE_ACCT_BACKEND") or "auto").lower()
+    file_store = FileStore()
+    if want == "file":
+        return file_store
+    if want == "keychain":
+        if not shutil.which("security"):
+            die("CLAUDE_ACCT_BACKEND=keychain but the `security` command is not available.")
+        return KeychainStore()
+    if want != "auto":
+        die(f"CLAUDE_ACCT_BACKEND must be auto, file or keychain (got {want!r})")
+    if sys.platform != "darwin" or not shutil.which("security"):
+        return file_store
+    kc = KeychainStore()
+    # Whichever one actually holds a login wins; a stale empty file must not
+    # shadow a real keychain login, and vice versa.
+    if kc.exists():
+        return kc
+    if file_store.exists() and file_store.read().get(OAUTH_KEY):
+        return file_store
+    return kc
+
+
+STORE = pick_store()
 
 
 def live_oauth() -> dict | None:
-    return read_json(CREDS).get("claudeAiOauth") or None
+    return STORE.read().get(OAUTH_KEY) or None
 
 
 def set_live_oauth(block: dict):
-    creds = read_json(CREDS)
-    creds["claudeAiOauth"] = block
-    write_json_secure(CREDS, creds)
+    doc = STORE.read()
+    doc[OAUTH_KEY] = block
+    STORE.write(doc)
 
 
 def clear_live_oauth():
-    creds = read_json(CREDS)
-    creds.pop("claudeAiOauth", None)
-    write_json_secure(CREDS, creds)
+    doc = STORE.read()
+    doc.pop(OAUTH_KEY, None)
+    STORE.write(doc)
+
+
+# ---------------------------------------------------------------------- lock
+#
+# Two `claude-acct` runs at once could interleave read-modify-write on the same
+# credential store and lose an account. Cheap to prevent.
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - POSIX only in practice
+    fcntl = None
+
+
+class _Lock:
+    def __init__(self, path: str):
+        self.path = path
+        self.fd = None
+
+    def __enter__(self):
+        if fcntl is None:
+            return self
+        profiles_dir()
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            info(f"{DIM}waiting for another claude-acct to finish...{OFF}")
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            os.close(self.fd)
+            self.fd = None
+        return False
+
+
+def lock():
+    return _Lock(LOCK_PATH)
 
 
 # ------------------------------------------------------------------- profiles
 
 
-def profiles_dir():
+def profiles_dir() -> str:
     os.makedirs(ACCOUNTS, mode=0o700, exist_ok=True)
     if os.stat(ACCOUNTS).st_mode & 0o077:
         os.chmod(ACCOUNTS, 0o700)
@@ -113,6 +320,18 @@ def profiles_dir():
 
 def profile_path(name: str) -> str:
     return os.path.join(profiles_dir(), f"{name}.json")
+
+
+VALID_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def check_name(name: str) -> str:
+    if not VALID_NAME.match(name) or name in (".", ".."):
+        die(
+            f"'{name}' is not a usable account name. Use letters, digits, dot, "
+            f"dash or underscore, starting with a letter or digit."
+        )
+    return name
 
 
 def list_profiles() -> list[str]:
@@ -135,44 +354,55 @@ def save_profile(name: str, block: dict, meta: dict | None = None):
     data = read_json(profile_path(name))
     data.update(meta or {})
     data["name"] = name
-    data["claudeAiOauth"] = block
+    data[OAUTH_KEY] = block
     data["savedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     write_json_secure(profile_path(name), data)
 
 
-def active_name() -> str | None:
+def read_ptr() -> str | None:
+    try:
+        with open(ACTIVE_PTR) as f:
+            ptr = f.read().strip()
+    except OSError:
+        return None
+    return ptr or None
+
+
+def set_active_ptr(name: str):
+    profiles_dir()
+    tmp = f"{ACTIVE_PTR}.tmp-{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(name + "\n")
+    os.replace(tmp, ACTIVE_PTR)
+
+
+def active_name(check_api: bool = False) -> str | None:
     """Which saved profile the live login belongs to.
 
     Claude Code rotates the access token every few hours, so a value match only
-    works right after a switch. The pointer file says which account we put there;
-    we confirm it still describes the same account by asking the API for the
-    live token's uuid. If the API is unreachable we trust the pointer.
+    works right after a switch. The pointer file says which account we put there.
+    With check_api=True we confirm the pointer still describes the same account
+    by asking the API for the live token's uuid - used before we overwrite a
+    saved profile with the live block. If the API is unreachable we trust the
+    pointer.
     """
     live = live_oauth()
     if not live:
         return None
     tok = live.get("accessToken")
     for n in list_profiles():
-        if load_profile(n).get("claudeAiOauth", {}).get("accessToken") == tok:
+        if load_profile(n).get(OAUTH_KEY, {}).get("accessToken") == tok:
             return n
-    try:
-        with open(ACTIVE_PTR) as f:
-            ptr = f.read().strip()
-    except OSError:
+    ptr = read_ptr()
+    if not ptr or ptr not in list_profiles():
         return None
-    if ptr not in list_profiles():
-        return None
-    saved_uuid = load_profile(ptr).get("accountUuid")
-    live_uuid = identity(live).get("accountUuid")
-    if saved_uuid and live_uuid and saved_uuid != live_uuid:
-        return None  # someone logged in as a different account behind our back
+    if check_api:
+        saved_uuid = load_profile(ptr).get("accountUuid")
+        live_uuid = identity(live).get("accountUuid")
+        if saved_uuid and live_uuid and saved_uuid != live_uuid:
+            return None  # someone logged in as a different account behind our back
     return ptr
-
-
-def set_active_ptr(name: str):
-    fd = os.open(ACTIVE_PTR, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(name + "\n")
 
 
 # ------------------------------------------------------------------------ API
@@ -181,13 +411,17 @@ def set_active_ptr(name: str):
 _IDENT_CACHE: dict[str, dict] = {}
 
 
-def api_profile(token: str, timeout: float = 10.0) -> tuple[int, dict]:
+def api_profile(token: str, timeout: float = API_TIMEOUT) -> tuple[int, dict]:
+    import urllib.error
+    import urllib.request
+
     req = urllib.request.Request(
         PROFILE_URL,
         headers={
             "Authorization": f"Bearer {token}",
             "anthropic-beta": "oauth-2025-04-20",
             "Content-Type": "application/json",
+            "User-Agent": f"claude-acct/{VERSION}",
         },
     )
     try:
@@ -209,9 +443,8 @@ def identity(block: dict) -> dict:
         return {}
     if os.environ.get("CLAUDE_ACCT_OFFLINE"):
         return {"tokenState": "not checked"}
-    if tok in _IDENT_CACHE:
-        return _IDENT_CACHE[tok]
-    _IDENT_CACHE[tok] = _identity_uncached(tok)
+    if tok not in _IDENT_CACHE:
+        _IDENT_CACHE[tok] = _identity_uncached(tok)
     return _IDENT_CACHE[tok]
 
 
@@ -242,6 +475,26 @@ def _identity_uncached(tok: str) -> dict:
     return {"tokenState": f"http {status}" if status else "offline"}
 
 
+def identify_many(blocks: dict[str, dict]) -> dict[str, dict]:
+    """identity() for several accounts at once - one API round trip of latency."""
+    todo = {n: b for n, b in blocks.items() if b.get("accessToken")}
+    if len(todo) < 2 or os.environ.get("CLAUDE_ACCT_OFFLINE"):
+        return {n: identity(b) for n, b in blocks.items()}
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(8, len(todo))) as pool:
+        list(pool.map(lambda b: identity(b), todo.values()))
+    return {n: identity(b) for n, b in blocks.items()}
+
+
+def humanise(seconds: float) -> str:
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
 def expiry_note(block: dict) -> str:
     exp = block.get("expiresAt")
     if not exp:
@@ -249,30 +502,80 @@ def expiry_note(block: dict) -> str:
     left = exp / 1000 - time.time()
     if left <= 0:
         return f"{DIM}expired (auto-renews){OFF}"
-    if left < 3600:
-        return f"{int(left // 60)}m left"
-    if left < 86400:
-        return f"{int(left // 3600)}h left"
-    return f"{int(left // 86400)}d left"
+    return f"{humanise(left)} left"
+
+
+def refresh_left(block: dict) -> float | None:
+    """Seconds until the refresh token dies, i.e. until a real re-login."""
+    exp = block.get("refreshTokenExpiresAt")
+    if not exp:
+        return None
+    return exp / 1000 - time.time()
+
+
+def token_state(block: dict, ident: dict) -> str:
+    """What --verify should print for one account.
+
+    An access token that has simply aged out reads as `invalid` to the API, but
+    Claude Code renews it from the refresh token on the next start - that is not
+    a broken account, so say so differently.
+    """
+    state = ident.get("tokenState", "?")
+    if state != "invalid":
+        return state
+    exp = block.get("expiresAt")
+    rleft = refresh_left(block)
+    if exp and exp / 1000 <= time.time() and (rleft is None or rleft > 0):
+        return "stale (renews)"
+    return "invalid"
+
+
+def refresh_warning(block: dict) -> str | None:
+    left = refresh_left(block)
+    if left is None:
+        return None
+    if left <= 0:
+        return "refresh token expired - this account needs `claude-acct add` again"
+    if left < 7 * 86400:
+        return f"refresh token expires in {humanise(left)}"
+    return None
 
 
 # --------------------------------------------------------------------- checks
 
 
 def running_claude_pids() -> list[int]:
-    pids = []
+    """PIDs of other `claude` processes. Best effort, never raises."""
     me = os.getpid()
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit() or int(entry) == me:
-            continue
+    pids: list[int] = []
+    if os.path.isdir("/proc"):
         try:
-            with open(f"/proc/{entry}/cmdline", "rb") as f:
-                argv0 = f.read().split(b"\0")[0].decode(errors="replace")
+            entries = os.listdir("/proc")
         except OSError:
-            continue
-        base = os.path.basename(argv0)
-        if base in ("claude", "claude.exe"):
-            pids.append(int(entry))
+            entries = []
+        for entry in entries:
+            if not entry.isdigit() or int(entry) == me:
+                continue
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as f:
+                    argv0 = f.read().split(b"\0")[0].decode(errors="replace")
+            except OSError:
+                continue
+            if os.path.basename(argv0) in ("claude", "claude.exe"):
+                pids.append(int(entry))
+        return sorted(pids)
+    # macOS and anything else without /proc.
+    if not shutil.which("pgrep"):
+        return []
+    try:
+        out = subprocess.run(
+            ["pgrep", "-x", "claude"], capture_output=True, text=True, timeout=5
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    for line in out.split():
+        if line.isdigit() and int(line) != me:
+            pids.append(int(line))
     return sorted(pids)
 
 
@@ -282,7 +585,7 @@ def warn_running():
         info(
             f"{YELLOW}note:{OFF} {len(pids)} claude session(s) still running "
             f"(pid {', '.join(map(str, pids))}). They keep the old account until you restart "
-            f"them, and one of them may rewrite the credential file when its token refreshes. "
+            f"them, and one of them may rewrite the credential store when its token refreshes. "
             f"Quit them for a clean switch."
         )
 
@@ -290,57 +593,121 @@ def warn_running():
 def confirm(question: str, assume_yes: bool) -> bool:
     if assume_yes or not sys.stdin.isatty():
         return True
-    return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    try:
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
 
 
 def slug(email: str) -> str:
-    return re.sub(r"[^a-z0-9._-]", "-", email.split("@")[0].lower()) or "account"
+    s = re.sub(r"[^a-z0-9._-]", "-", email.split("@")[0].lower()).strip("-.") or "account"
+    if not VALID_NAME.match(s):
+        s = "account-" + s.lstrip("-.")
+    # An account called `list` would shadow the command of the same name.
+    return f"{s}-acct" if s in COMMANDS else s
+
+
+def stash_live(live: dict) -> str:
+    """Save an unrecognised live login under its own name. Returns that name."""
+    ident = identity(live)
+    name = slug(ident["email"]) if ident.get("email") else f"unsaved-{int(time.time())}"
+    save_profile(name, live, {k: v for k, v in ident.items() if k != "tokenState"})
+    return name
+
+
+def sync_live_before_switch(live: dict) -> str | None:
+    """Never drop a login we cannot get back. Returns the profile it went to."""
+    cur = active_name(check_api=True)
+    if cur:
+        save_profile(cur, live, {})
+        return cur
+    name = stash_live(live)
+    info(f"{DIM}stashed the current login as '{name}' first{OFF}")
+    return name
 
 
 # ------------------------------------------------------------------- commands
 
 
-def cmd_list(verify=False, **_):
+def cmd_list(verify=False, as_json=False, **_):
     names = list_profiles()
     live = live_oauth()
-    cur = active_name()
-    if not names:
+    cur = active_name(check_api=verify)
+    if not names and not as_json:
         info("No accounts saved yet.")
         if live:
             info("You are logged in - save this one with:  claude-acct save <name>")
         else:
             info("Log in with:  claude-acct add <name>")
         return
-    rows = []
-    for n in names:
-        p = load_profile(n)
-        blk = p.get("claudeAiOauth", {})
-        state = ""
-        if verify:
-            ident = identity(blk)
-            state = ident.get("tokenState", "?")
-            if ident.get("email"):
-                p["email"] = ident["email"]
-                p["plan"] = ident["plan"]
-                p["accountUuid"] = ident["accountUuid"]
+
+    profiles = {n: load_profile(n) for n in names}
+    idents: dict[str, dict] = {}
+    if verify:
+        idents = identify_many({n: p.get(OAUTH_KEY, {}) for n, p in profiles.items()})
+        for n, ident in idents.items():
+            if not ident.get("email"):
+                continue
+            p = profiles[n]
+            fresh = {k: ident[k] for k in ("email", "plan", "accountUuid") if ident.get(k)}
+            if any(p.get(k) != v for k, v in fresh.items()):
+                p.update(fresh)
                 write_json_secure(profile_path(n), p)
-        rows.append(
-            (
-                "*" if n == cur else " ",
-                n,
-                p.get("email") or "?",
-                p.get("plan") or "?",
-                expiry_note(blk),
-                state,
-                (p.get("savedAt") or "")[:10],
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "backend": STORE.name,
+                    "active": cur,
+                    "accounts": [
+                        {
+                            "name": n,
+                            "email": profiles[n].get("email"),
+                            "plan": profiles[n].get("plan"),
+                            "accountUuid": profiles[n].get("accountUuid"),
+                            "savedAt": profiles[n].get("savedAt"),
+                            "active": n == cur,
+                            "expiresAt": profiles[n].get(OAUTH_KEY, {}).get("expiresAt"),
+                            "refreshTokenExpiresAt": profiles[n]
+                            .get(OAUTH_KEY, {})
+                            .get("refreshTokenExpiresAt"),
+                            "tokenState": token_state(
+                                profiles[n].get(OAUTH_KEY, {}), idents[n]
+                            )
+                            if verify
+                            else None,
+                        }
+                        for n in names
+                    ],
+                },
+                indent=2,
             )
         )
-    w = [max(len(str(r[i])) for r in rows + [(" ", "NAME", "EMAIL", "PLAN", "TOKEN", "STATE", "SAVED")]) for i in range(7)]
-    hdr = ("", "NAME", "EMAIL", "PLAN", "TOKEN", "STATE", "SAVED")
-    print(DIM + "  ".join(h.ljust(w[i]) for i, h in enumerate(hdr)).rstrip() + OFF)
+        return
+
+    # The STATE column is only meaningful once we have actually asked the API.
+    hdr = ("", "NAME", "EMAIL", "PLAN", "TOKEN") + (("STATE",) if verify else ()) + ("SAVED",)
+    rows = [
+        ("*" if n == cur else " ",
+         n,
+         profiles[n].get("email") or "?",
+         profiles[n].get("plan") or "?",
+         expiry_note(profiles[n].get(OAUTH_KEY, {})))
+        + ((token_state(profiles[n].get(OAUTH_KEY, {}), idents.get(n, {})),) if verify else ())
+        + ((profiles[n].get("savedAt") or "")[:10],)
+        for n in names
+    ]
+    w = [max(visible_len(str(r[i])) for r in [hdr, *rows]) for i in range(len(hdr))]
+    print(DIM + "  ".join(pad(h, w[i]) for i, h in enumerate(hdr)).rstrip() + OFF)
     for r in rows:
-        line = "  ".join(str(c).ljust(w[i]) for i, c in enumerate(r)).rstrip()
+        line = "  ".join(pad(str(c), w[i]) for i, c in enumerate(r)).rstrip()
         print((GREEN + line + OFF) if r[0] == "*" else line)
+
+    for n in names:
+        warn = refresh_warning(profiles[n].get(OAUTH_KEY, {}))
+        if warn:
+            info(f"{YELLOW}note:{OFF} {n}: {warn}")
     if cur is None and live:
         info(
             f"\n{YELLOW}note:{OFF} the current login does not match any saved account. "
@@ -348,19 +715,56 @@ def cmd_list(verify=False, **_):
         )
 
 
-def cmd_whoami(**_):
+def cmd_active(as_json=False, **_):
+    cur = active_name()
+    if as_json:
+        print(json.dumps({"active": cur, "backend": STORE.name}))
+    elif cur:
+        print(cur)
+    else:
+        sys.exit(1)
+
+
+def cmd_whoami(as_json=False, **_):
     live = live_oauth()
     if not live:
-        print("not logged in")
-        return
+        if as_json:
+            print(json.dumps({"loggedIn": False, "backend": STORE.name}))
+        else:
+            print("not logged in")
+        sys.exit(1)
     ident = identity(live)
-    name = active_name()
+    name = active_name(check_api=True)
+    overrides = [
+        v for v in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN") if os.environ.get(v)
+    ]
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "loggedIn": True,
+                    "backend": STORE.name,
+                    "account": name,
+                    "email": ident.get("email"),
+                    "plan": ident.get("plan") or live.get("subscriptionType"),
+                    "org": ident.get("org"),
+                    "accountUuid": ident.get("accountUuid"),
+                    "tokenState": ident.get("tokenState"),
+                    "expiresAt": live.get("expiresAt"),
+                    "envOverrides": overrides,
+                },
+                indent=2,
+            )
+        )
+        return
     email = ident.get("email") or "(could not reach the API)"
     plan = ident.get("plan") or live.get("subscriptionType") or "?"
-    print(f"{BOLD}{email}{OFF}  [{plan}]  saved as: {name or '(unsaved)'}  token: {expiry_note(live)}")
-    for var in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
-        if os.environ.get(var):
-            info(f"{YELLOW}warning:{OFF} ${var} is set in this shell and overrides the saved login.")
+    print(
+        f"{BOLD}{email}{OFF}  [{plan}]  saved as: {name or '(unsaved)'}  "
+        f"token: {expiry_note(live)}"
+    )
+    for var in overrides:
+        info(f"{YELLOW}warning:{OFF} ${var} is set in this shell and overrides the saved login.")
 
 
 def cmd_save(name=None, yes=False, **_):
@@ -372,6 +776,7 @@ def cmd_save(name=None, yes=False, **_):
         if not ident.get("email"):
             die("could not reach the API to name this account automatically - pass a name.")
         name = slug(ident["email"])
+    check_name(name)
     if os.path.exists(profile_path(name)) and not confirm(f"overwrite saved account '{name}'?", yes):
         die("aborted")
     save_profile(name, live, {k: v for k, v in ident.items() if k != "tokenState"})
@@ -383,7 +788,7 @@ def cmd_sync(**_):
     live = live_oauth()
     if not live:
         die("not logged in - nothing to sync.")
-    n = active_name()
+    n = active_name(check_api=True)
     if not n:
         die("current login is not one of the saved accounts. Use `claude-acct save <name>`.")
     save_profile(n, live, {})
@@ -392,9 +797,9 @@ def cmd_sync(**_):
 
 def cmd_use(name=None, yes=False, no_sync=False, **_):
     if not name:
-        die("usage: claude-acct use <name>")
+        die("usage: claude-acct use <name>", USAGE_EXIT)
     target = load_profile(name)
-    blk = target.get("claudeAiOauth")
+    blk = target.get(OAUTH_KEY)
     if not blk:
         die(f"'{name}' has no saved credentials. Re-save it with `claude-acct add {name}`.")
 
@@ -404,59 +809,61 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
         set_active_ptr(name)
         return
 
-    # Never drop a login we cannot get back.
     if live and not no_sync:
-        cur = active_name()
-        if cur:
-            save_profile(cur, live, {})
-        else:
-            ident = identity(live)
-            stash = slug(ident["email"]) if ident.get("email") else f"unsaved-{int(time.time())}"
-            save_profile(stash, live, {k: v for k, v in ident.items() if k != "tokenState"})
-            info(f"{DIM}stashed the current login as '{stash}' first{OFF}")
+        sync_live_before_switch(live)
 
     set_live_oauth(blk)
     set_active_ptr(name)
-    print(f"switched to {GREEN}{name}{OFF} ({target.get('email') or 'email unknown'}, {target.get('plan') or '?'})")
+    print(
+        f"switched to {GREEN}{name}{OFF} "
+        f"({target.get('email') or 'email unknown'}, {target.get('plan') or '?'})"
+    )
+    warn = refresh_warning(blk)
+    if warn:
+        info(f"{YELLOW}note:{OFF} {warn}")
     warn_running()
     print(f"{DIM}open a new terminal and run `claude` - it will start as this account.{OFF}")
 
 
 def cmd_add(name=None, yes=False, **_):
     if not name:
-        die("usage: claude-acct add <name>")
+        die("usage: claude-acct add <name>", USAGE_EXIT)
+    check_name(name)
     if os.path.exists(profile_path(name)) and not confirm(f"'{name}' already exists - replace it?", yes):
         die("aborted")
+    if not shutil.which("claude"):
+        die("`claude` is not on your PATH, so I can't drive the login. Install Claude Code first.")
+    if not sys.stdin.isatty():
+        die("adding an account needs a terminal - run `claude-acct add " + name + "` from one.")
 
     live = live_oauth()
     if live:
-        cur = active_name()
-        if cur:
-            save_profile(cur, live, {})
-            info(f"{DIM}saved the current login ({cur}) before logging out{OFF}")
-        else:
-            ident = identity(live)
-            stash = slug(ident["email"]) if ident.get("email") else f"unsaved-{int(time.time())}"
-            save_profile(stash, live, {k: v for k, v in ident.items() if k != "tokenState"})
-            info(f"{DIM}stashed the current login as '{stash}'{OFF}")
-
-    if not sys.stdin.isatty():
-        info("Not a terminal, so I can't drive the login for you. In a terminal run:")
-        info("    claude-acct add " + name)
-        die("aborted")
+        where = sync_live_before_switch(live)
+        info(f"{DIM}saved the current login ({where}) before logging out{OFF}")
 
     warn_running()
     clear_live_oauth()
     info(f"\nStarting `claude` with no login. Sign in as the {BOLD}{name}{OFF} account")
     info("(use /login if it does not prompt), then exit with /exit or Ctrl-D.\n")
-    subprocess.call(["claude"])
 
-    new = live_oauth()
-    if not new:
-        info(f"{YELLOW}no login found after that.{OFF} Nothing saved for '{name}'.")
+    new: dict | None = None
+    same = False
+    try:
+        subprocess.call(["claude"])
+    finally:
+        new = live_oauth()
+        same = bool(live and new and new.get("accessToken") == live.get("accessToken"))
+        if (not new or same) and live:
+            # Nothing new was signed in - put back what was there. This also
+            # covers Ctrl-C: never leave the user logged out of everything.
+            set_live_oauth(live)
+
+    if not new or same:
+        info(f"{YELLOW}no new login found after that.{OFF} Nothing saved for '{name}'.")
         prev = active_name()
-        info("Your other accounts are untouched" + (f"; run `claude-acct use {prev}`." if prev else "."))
+        info("Your previous login was restored" + (f" ({prev})." if prev else "."))
         sys.exit(1)
+
     ident = identity(new)
     save_profile(name, new, {k: v for k, v in ident.items() if k != "tokenState"})
     set_active_ptr(name)
@@ -465,38 +872,151 @@ def cmd_add(name=None, yes=False, **_):
 
 def cmd_rm(name=None, yes=False, **_):
     if not name:
-        die("usage: claude-acct rm <name>")
+        die("usage: claude-acct rm <name>", USAGE_EXIT)
     load_profile(name)  # existence check
     if name == active_name():
-        info(f"{YELLOW}note:{OFF} '{name}' is the account you are logged in as right now; "
-             f"deleting the saved copy does not log you out.")
+        info(
+            f"{YELLOW}note:{OFF} '{name}' is the account you are logged in as right now; "
+            f"deleting the saved copy does not log you out."
+        )
     if not confirm(f"delete saved account '{name}'?", yes):
         die("aborted")
-    os.remove(profile_path(name))
-    for extra in (profile_path(name) + ".bak",):
-        if os.path.exists(extra):
-            os.remove(extra)
+    for f in (profile_path(name), profile_path(name) + ".bak"):
+        if os.path.exists(f):
+            os.remove(f)
+    if read_ptr() == name:
+        os.remove(ACTIVE_PTR)
     print(f"deleted {name}")
 
 
 def cmd_rename(name=None, new=None, **_):
     if not name or not new:
-        die("usage: claude-acct rename <old> <new>")
+        die("usage: claude-acct rename <old> <new>", USAGE_EXIT)
+    check_name(new)
     data = load_profile(name)
     if os.path.exists(profile_path(new)):
         die(f"'{new}' already exists")
+    was_active = read_ptr() == name or active_name() == name
     data["name"] = new
     write_json_secure(profile_path(new), data)
     for f in (profile_path(name), profile_path(name) + ".bak"):
         if os.path.exists(f):
             os.remove(f)
-    if active_name() == new or (os.path.exists(ACTIVE_PTR) and open(ACTIVE_PTR).read().strip() == name):
+    if was_active:
         set_active_ptr(new)
     print(f"renamed {name} -> {new}")
 
 
+def cmd_doctor(fix=False, verify=False, as_json=False, **_):
+    problems: list[dict] = []
+
+    def note(level: str, msg: str, fixed: str | None = None):
+        problems.append({"level": level, "message": msg, "fixed": fixed})
+
+    live = live_oauth()
+    names = list_profiles()
+
+    for var in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+        if os.environ.get(var):
+            note("warn", f"${var} is set and overrides the saved login entirely")
+
+    if os.path.isdir(ACCOUNTS):
+        mode = os.stat(ACCOUNTS).st_mode & 0o777
+        if mode & 0o077:
+            if fix:
+                os.chmod(ACCOUNTS, 0o700)
+                note("warn", f"{ACCOUNTS} was {mode:o}", "chmod 700")
+            else:
+                note("error", f"{ACCOUNTS} is mode {mode:o}; it should be 700")
+
+    for n in names:
+        p = profile_path(n)
+        mode = os.stat(p).st_mode & 0o777
+        if mode & 0o077:
+            if fix:
+                os.chmod(p, 0o600)
+                note("warn", f"{p} was {mode:o}", "chmod 600")
+            else:
+                note("error", f"{p} is mode {mode:o}; it should be 600")
+        if not read_json(p).get(OAUTH_KEY, {}).get("accessToken"):
+            note("error", f"'{n}' has no saved credentials; re-add it")
+        warn = refresh_warning(read_json(p).get(OAUTH_KEY, {}))
+        if warn:
+            note("warn", f"{n}: {warn}")
+
+    stale = []
+    if os.path.isdir(ACCOUNTS):
+        stale = [
+            os.path.join(ACCOUNTS, f)
+            for f in os.listdir(ACCOUNTS)
+            if ".tmp-claude-acct" in f or f.endswith(".json.bak")
+        ]
+    for f in stale:
+        if fix:
+            os.remove(f)
+            note("warn", f"stale file {f}", "removed")
+        else:
+            note("warn", f"stale file {f} (contains an old credential); --fix removes it")
+
+    ptr = read_ptr()
+    if ptr and ptr not in names:
+        note("error", f"active pointer names '{ptr}', which is not a saved account")
+    if live and active_name(check_api=verify) is None:
+        note("warn", "the live login does not match any saved account; `claude-acct save <name>`")
+    if not live:
+        note("warn", "not logged in right now")
+
+    pids = running_claude_pids()
+    if pids:
+        note("warn", f"{len(pids)} claude session(s) running; they may rewrite the credentials")
+
+    if verify and names:
+        blocks = {n: load_profile(n).get(OAUTH_KEY, {}) for n in names}
+        for n, ident in identify_many(blocks).items():
+            state = token_state(blocks[n], ident)
+            if state in ("ok", "not checked", "stale (renews)", None):
+                continue
+            level = "warn" if state.startswith(("offline", "http")) else "error"
+            note(level, f"'{n}' token state: {state}")
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "backend": STORE.name,
+                    "store": STORE.where,
+                    "configDir": CLAUDE_DIR,
+                    "accountsDir": ACCOUNTS,
+                    "accounts": names,
+                    "active": active_name(),
+                    "problems": problems,
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"{BOLD}claude-acct {VERSION}{OFF}")
+        print(f"  backend      {STORE.name} ({STORE.where})")
+        print(f"  config dir   {CLAUDE_DIR}")
+        print(f"  accounts     {ACCOUNTS} ({len(names)} saved)")
+        print(f"  active       {active_name() or '(none)'}")
+        print()
+        if not problems:
+            print(f"{GREEN}no problems found{OFF}")
+        for p in problems:
+            colour = RED if p["level"] == "error" else YELLOW
+            suffix = f" {GREEN}[{p['fixed']}]{OFF}" if p["fixed"] else ""
+            print(f"  {colour}{p['level']}{OFF}  {p['message']}{suffix}")
+    if any(p["level"] == "error" and not p["fixed"] for p in problems):
+        sys.exit(1)
+
+
 def cmd_help(**_):
     print(__doc__.strip())
+
+
+def cmd_version(**_):
+    print(f"claude-acct {VERSION}")
 
 
 COMMANDS = {
@@ -505,23 +1025,42 @@ COMMANDS = {
     "save": cmd_save,
     "add": cmd_add, "new": cmd_add, "login": cmd_add,
     "whoami": cmd_whoami, "current": cmd_whoami,
+    "active": cmd_active,
     "sync": cmd_sync,
     "rm": cmd_rm, "remove": cmd_rm, "delete": cmd_rm,
     "rename": cmd_rename, "mv": cmd_rename,
+    "doctor": cmd_doctor, "check": cmd_doctor,
     "help": cmd_help, "-h": cmd_help, "--help": cmd_help,
+    "version": cmd_version, "-V": cmd_version, "--version": cmd_version,
+}
+
+# Commands that only read; they skip the lock and never touch the store.
+READ_ONLY = {cmd_list, cmd_whoami, cmd_active, cmd_help, cmd_version}
+
+FLAGS = {
+    "-y": "yes", "--yes": "yes",
+    "--verify": "verify",
+    "--no-sync": "no_sync",
+    "--json": "as_json",
+    "--fix": "fix",
+    "--no-color": "no_color",
 }
 
 
 def main(argv: list[str]):
-    flags = {"yes": False, "verify": False, "no_sync": False}
-    args = []
+    flags = {"yes": False, "verify": False, "no_sync": False, "as_json": False,
+             "fix": False, "no_color": False}
+    args: list[str] = []
+    only_positional = False
     for a in argv:
-        if a in ("-y", "--yes"):
-            flags["yes"] = True
-        elif a == "--verify":
-            flags["verify"] = True
-        elif a == "--no-sync":
-            flags["no_sync"] = True
+        if only_positional:
+            args.append(a)
+        elif a == "--":
+            only_positional = True
+        elif a in FLAGS:
+            flags[FLAGS[a]] = True
+        elif a.startswith("-") and a not in COMMANDS:
+            die(f"unknown option '{a}'. Try: claude-acct help", USAGE_EXIT)
         else:
             args.append(a)
 
@@ -529,17 +1068,48 @@ def main(argv: list[str]):
     fn = COMMANDS.get(cmd)
     if not fn:
         # `claude-acct eben` is a shortcut for `claude-acct use eben`
-        if os.path.exists(profile_path(cmd)):
+        if VALID_NAME.match(cmd) and os.path.exists(profile_path(cmd)):
             fn, args = cmd_use, ["use", cmd]
         else:
-            die(f"unknown command '{cmd}'. Try: claude-acct help")
-    fn(name=args[1] if len(args) > 1 else None,
-       new=args[2] if len(args) > 2 else None,
-       **flags)
+            known = ", ".join(list_profiles())
+            hint = f" Saved accounts: {known}." if known else ""
+            die(f"unknown command '{cmd}'. Try: claude-acct help{hint}", USAGE_EXIT)
+    if len(args) > 3:
+        die(f"too many arguments for '{cmd}'", USAGE_EXIT)
+
+    def call():
+        fn(
+            name=args[1] if len(args) > 1 else None,
+            new=args[2] if len(args) > 2 else None,
+            **flags,
+        )
+
+    # `list --verify` writes the refreshed email/plan back, so it needs the lock too.
+    if fn in READ_ONLY and not flags["verify"]:
+        call()
+    else:
+        with lock():
+            call()
+
+
+def _run() -> int:
+    try:
+        main(sys.argv[1:])
+    except SystemExit as e:
+        if isinstance(e.code, int):
+            return e.code
+        return 0 if e.code is None else 1
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        main(sys.argv[1:])
+        code = _run()
+        sys.stdout.flush()
     except KeyboardInterrupt:
-        sys.exit(130)
+        code = 130
+    except BrokenPipeError:
+        # `claude-acct list | head` — say nothing, leave no traceback.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        code = 0
+    sys.exit(code)
