@@ -3,6 +3,35 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [1.3.0] — 2026-08-06
+
+### Added
+
+- **`doctor` now works out when you next have to log in for real, and the
+  cheapest day to do it.** A refresh token lasts about 30 days from the `/login`
+  that issued it and using the account does not extend it — measured across four
+  accounts, one of which had its access token reissued that morning and still
+  expired 30 days after its first login. So it is a hard monthly expiry per
+  account, and with several accounts the dates drift apart into a browser
+  round-trip per account per month. Logging in early resets the full window, so
+  `doctor` names the account that goes first and says to do them all that day,
+  which collapses them onto one date:
+
+  ```
+  re-login     by 2026-08-30 (work); the other 3 by 2026-09-04
+               windows are ~30d from login and do not slide, so re-login all 4 on
+               2026-08-30 and they collapse to one date
+  ```
+
+  `doctor --json` carries the same thing under `reloginPlan`, and an account whose
+  refresh token has already died is called out separately — that one needs
+  `claudehop add` rather than planning.
+
+### Changed
+
+- **The expiry warning starts 14 days out instead of 7.** With several accounts on
+  staggered dates, one week is not enough notice to plan a single sitting.
+
 ## [1.2.1] — 2026-08-06
 
 ### Changed

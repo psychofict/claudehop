@@ -134,10 +134,37 @@ get back to a session you'd otherwise have to re-authenticate.
 - `--long` showing `expired (auto-renews)` under `TOKEN` is normal — the access
   token is short lived and Claude Code renews it from the refresh token.
   `list --verify` prints `stale (renews)` for the same reason. What actually
-  matters is the refresh token, and you get a warning a week before that one runs
-  out. This is why the default listing doesn't show either of them.
+  matters is the refresh token; see below. This is why the default listing
+  doesn't show either of them.
 - Each account still has its own rate limits and its own terms. This moves your
   own logins between your own terminals; it is not a way to pool quota.
+
+## Every account needs a real login about once a month
+
+The refresh token is good for roughly 30 days from the `/login` that issued it,
+and **using the account does not extend it.** Measured 2026-08-06 across four
+accounts: one had its access token reissued that morning and its refresh window
+still ended 30 days after its first login, not 30 days after the refresh. So this
+is a hard monthly expiry per account, and nothing on this side can lengthen it —
+it's set by the OAuth server. `claude setup-token` is not a way around it either;
+those tokens expire too, and carry inference scope only.
+
+With several accounts the dates drift apart and you get a browser round-trip per
+account per month. Logging in early resets the whole 30 days, so the cheap move is
+to do them all on the day the earliest one comes due — after that they share one
+date and it's one sitting a month. `doctor` works this out for you:
+
+```
+$ hop doctor
+  accounts     /home/you/.claude/accounts (4 saved)
+  active       work
+  re-login     by 2026-08-30 (work); the other 3 by 2026-09-04
+               windows are ~30d from login and do not slide, so re-login all 4 on
+               2026-08-30 and they collapse to one date
+```
+
+You also get a per-account warning starting 14 days out, and `doctor --json`
+carries the same thing under `reloginPlan` if you want to hang a reminder off it.
 
 ## Why not `claude setup-token`
 
@@ -167,7 +194,7 @@ bin/claudehop              the tool (python3, stdlib only)
 shell/claudehop.sh           PATH, tab-completion, back-compat aliases
 extras/statusline-snippet.sh show the active account in the Claude Code statusline
 install.sh                   symlink/copy into ~/.claude, wire up the rc file
-test/test-switch.sh          87 checks against a throwaway config dir, no network
+test/test-switch.sh          95 checks against a throwaway config dir, no network
 ```
 
 ## Tests
