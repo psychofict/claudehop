@@ -483,6 +483,66 @@ printf '%s' "$out" | grep -qi 'which' \
   || ok "bare hop in a pipe does not prompt"
 is "bare hop in a pipe switches nothing" "$(live_token)" "tok-A"
 
+# --- 12e. the re-login plan ---------------------------------------------------
+# Refresh windows are ~30 days from the login that issued them and do not slide,
+# so with several accounts the dates drift apart. doctor should name the earliest
+# and say to do them all that day, which resets every window to the same date.
+seed
+python3 - <<'PY'
+import json, os, time
+d = os.environ['CLAUDE_ACCOUNTS_DIR']
+now = time.time()
+for n, days in (('alpha', 3), ('beta', 20)):          # 3d away, and 20d away
+    p = json.load(open(f"{d}/{n}.json"))
+    p['claudeAiOauth']['refreshTokenExpiresAt'] = int((now + days * 86400) * 1000)
+    json.dump(p, open(f"{d}/{n}.json", "w"))
+PY
+out="$("$HOP" doctor 2>/dev/null)"
+case "$out" in *"re-login     by"*) ok "doctor prints a re-login date" ;;
+              *) bad "doctor prints a re-login date" "$out" ;; esac
+case "$out" in *"(alpha)"*) ok "doctor names the account that expires first" ;;
+              *) bad "doctor names the account that expires first" "$out" ;; esac
+case "$out" in *"collapse them to one date"*|*"collapse to one date"*)
+                ok "doctor says to batch the re-logins" ;;
+              *) bad "doctor says to batch the re-logins" "$out" ;; esac
+case "$out" in *"alpha: refresh token expires in "*)
+                ok "an account inside the notice window is warned about" ;;
+              *) bad "an account inside the notice window is warned about" "$out" ;; esac
+case "$out" in *"beta: refresh token expires"*)
+                bad "an account 20d out is not warned about yet" "warned too early" ;;
+              *) ok "an account 20d out is not warned about yet" ;; esac
+is "the plan is in --json" \
+   "$("$HOP" doctor --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["reloginPlan"]["firstAccounts"][0])')" \
+   "alpha"
+
+# One account, or dates within a day of each other, means nothing to batch.
+seed
+python3 - <<'PY'
+import json, os, time
+d = os.environ['CLAUDE_ACCOUNTS_DIR']
+now = time.time()
+for n in ('alpha', 'beta'):
+    p = json.load(open(f"{d}/{n}.json"))
+    p['claudeAiOauth']['refreshTokenExpiresAt'] = int((now + 20 * 86400) * 1000)
+    json.dump(p, open(f"{d}/{n}.json", "w"))
+PY
+out="$("$HOP" doctor 2>/dev/null)"
+case "$out" in *"collapse"*) bad "no batching advice when the dates already match" "$out" ;;
+              *) ok "no batching advice when the dates already match" ;; esac
+
+# An already-dead refresh token needs a real login, not a batching suggestion.
+seed
+python3 - <<'PY'
+import json, os, time
+d = os.environ['CLAUDE_ACCOUNTS_DIR']
+p = json.load(open(f"{d}/alpha.json"))
+p['claudeAiOauth']['refreshTokenExpiresAt'] = int((time.time() - 86400) * 1000)
+json.dump(p, open(f"{d}/alpha.json", "w"))
+PY
+out="$("$HOP" doctor 2>/dev/null)"
+case "$out" in *"expired: alpha"*) ok "doctor calls out a dead refresh token" ;;
+              *) bad "doctor calls out a dead refresh token" "$out" ;; esac
+
 # --- 13. unit checks on the tricky helpers ------------------------------------
 unit() {  # unit <name> <python expression> <expected>
   local got
