@@ -1,42 +1,49 @@
 #!/usr/bin/env python3
 """claudehop - hop Claude Code between several Claude accounts.
 
+To switch accounts, run `hop` and pick one. That is the whole tool.
+
+  hop                  show your accounts, pick one to hop to
+  hop <name>           hop straight to that one
+  hop add <name>       log in as a new account and save it
+
+A hop takes effect for the next `claude` you start. Sessions already running
+keep the account they began with.
+
+Now and then:
+
+  hop whoami           who is logged in right now (asks the API)
+  hop save <name>      save a login you did by hand, under a name
+  hop list --long      token expiry and when each account was saved
+  hop rm <name>        delete a saved account (does not log you out)
+  hop rename <old> <new>
+  hop doctor [--fix]   check the setup, repair what it can
+
+Flags:
+
+  -y, --yes            never prompt; also overrides the running-session stop
+  --verify             check saved tokens against the API
+  --long               more columns in the listing
+  --json               machine-readable output
+  --no-color           plain text
+  -V, --version        print the version
+
+Also accepted, for scripts and old habits: `use`/`switch` (what `hop <name>`
+does), `ls`, `active` (print the active name, no network), `sync` (write the live
+login back to its file), `--no-sync`, and the pre-1.2.0 names `claude-acct` and
+`cacct`.
+
 How it works: Claude Code keeps the live login under the "claudeAiOauth" key of
 its credential store - ~/.claude/.credentials.json on Linux, the login keychain
 on macOS. This tool keeps one saved copy of that block per account in
 ~/.claude/accounts/<name>.json and swaps the active one in and out. Everything
-else in the store (MCP server OAuth) is left untouched.
+else in the store, including your MCP server logins, is left alone. Email and
+plan are re-fetched from the API by Claude Code at startup, so swapping the
+credential is the entire job.
 
-Account identity (email, plan) is re-fetched from the API by Claude Code on
-startup, so nothing else needs patching - start a new `claude` and it is the
-other account.
-
-Commands:
-  claudehop                    list saved accounts (same as `list`)
-  claudehop <name>             hop to that account (shorthand for `use`)
-  claudehop use <name>         same thing, spelled out
-  claudehop save [name]        save the current login as <name>
-  claudehop add [name]         log in as a new account and save it
-  claudehop whoami             who is logged in right now (asks the API)
-  claudehop active             print the active account name (no network)
-  claudehop sync               copy the live login back into its saved file
-  claudehop rm <name>          delete a saved account
-  claudehop rename <old> <new>
-  claudehop doctor [--fix]     check the setup and report anything odd
-
-Flags:
-  -y, --yes        never prompt
-  --verify         check each saved token against the API (`list`, `doctor`)
-  --no-sync        don't write the live login back before switching
-  --json           machine-readable output (`list`, `whoami`, `active`, `doctor`)
-  --no-color       plain text
-  -V, --version    print the version
-
-Environment:
-  CLAUDE_CONFIG_DIR      where Claude Code keeps its config (default ~/.claude)
-  CLAUDE_ACCOUNTS_DIR    where saved accounts live (default <config>/accounts)
-  CLAUDE_HOP_BACKEND     auto (default) | file | keychain
-  CLAUDE_HOP_OFFLINE=1   never call the API
+Environment: CLAUDE_CONFIG_DIR (default ~/.claude), CLAUDE_ACCOUNTS_DIR
+(default <config>/accounts), CLAUDE_HOP_BACKEND (auto|file|keychain),
+CLAUDE_HOP_OFFLINE=1 to never call the API.
 """
 
 from __future__ import annotations
@@ -47,11 +54,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 PROG = "claudehop"
 
 
@@ -609,6 +617,55 @@ def warn_running():
         )
 
 
+class _TerminalGone(Exception):
+    """SIGHUP/SIGTERM arrived - unwind so the cleanup blocks get to run."""
+
+
+def _guard_child_signals() -> dict:
+    """Make a long interactive child safe to wait on. Returns what to restore.
+
+    Two different problems, both of which lost a finished login:
+
+    * SIGINT. Claude Code uses Ctrl-C to cancel the current turn, not to quit,
+      so the first one must not unwind this process - it would save and exit
+      while `claude` is still running and still writing to the credential store.
+      A shell ignores SIGINT while a foreground child runs; do the same. This
+      has to be a no-op Python handler rather than SIG_IGN, because SIG_IGN
+      survives exec and would leave `claude` itself unable to see Ctrl-C.
+    * SIGHUP/SIGTERM. The default action kills us outright, which skips every
+      cleanup path and drops a credential that has already been issued. Turn
+      them into an exception instead.
+    """
+
+    def ignore(signum, frame):
+        pass
+
+    def bail(signum, frame):
+        raise _TerminalGone(signum)
+
+    old: dict = {}
+    for sig, handler in (
+        (getattr(signal, "SIGINT", None), ignore),
+        (getattr(signal, "SIGHUP", None), bail),
+        (getattr(signal, "SIGTERM", None), bail),
+    ):
+        if sig is None:
+            continue
+        try:
+            old[sig] = signal.signal(sig, handler)
+        except (OSError, ValueError):  # not the main thread, or unsupported here
+            pass
+    return old
+
+
+def _restore_signals(old: dict):
+    for sig, handler in old.items():
+        try:
+            signal.signal(sig, handler)
+        except (OSError, ValueError):
+            pass
+
+
 def confirm(question: str, assume_yes: bool) -> bool:
     if assume_yes or not sys.stdin.isatty():
         return True
@@ -648,7 +705,16 @@ def sync_live_before_switch(live: dict) -> str | None:
 # ------------------------------------------------------------------- commands
 
 
-def cmd_list(verify=False, as_json=False, **_):
+def print_table(hdr: tuple, rows: list, highlight=()):
+    """Columns wide enough for their widest cell; highlight those row indexes."""
+    w = [max(visible_len(str(r[i])) for r in [hdr, *rows]) for i in range(len(hdr))]
+    print(DIM + "  ".join(pad(str(h), w[i]) for i, h in enumerate(hdr)).rstrip() + OFF)
+    for i, r in enumerate(rows):
+        line = "  ".join(pad(str(c), w[j]) for j, c in enumerate(r)).rstrip()
+        print((GREEN + line + OFF) if i in highlight else line)
+
+
+def cmd_list(verify=False, as_json=False, long_=False, **_):
     names = list_profiles()
     live = live_oauth()
     cur = active_name(check_api=verify)
@@ -705,23 +771,30 @@ def cmd_list(verify=False, as_json=False, **_):
         )
         return
 
-    # The STATE column is only meaningful once we have actually asked the API.
-    hdr = ("", "NAME", "EMAIL", "PLAN", "TOKEN") + (("STATE",) if verify else ()) + ("SAVED",)
-    rows = [
-        ("*" if n == cur else " ",
-         n,
-         profiles[n].get("email") or "?",
-         profiles[n].get("plan") or "?",
-         expiry_note(profiles[n].get(OAUTH_KEY, {})))
-        + ((token_state(profiles[n].get(OAUTH_KEY, {}), idents.get(n, {})),) if verify else ())
-        + ((profiles[n].get("savedAt") or "")[:10],)
-        for n in names
-    ]
-    w = [max(visible_len(str(r[i])) for r in [hdr, *rows]) for i in range(len(hdr))]
-    print(DIM + "  ".join(pad(h, w[i]) for i, h in enumerate(hdr)).rstrip() + OFF)
-    for r in rows:
-        line = "  ".join(pad(str(c), w[i]) for i, c in enumerate(r)).rstrip()
-        print((GREEN + line + OFF) if r[0] == "*" else line)
+    # Default columns answer the only question that matters - which account is
+    # which. Token expiry and save dates needed a paragraph of explanation to be
+    # readable at all, so they moved behind --long. STATE only means something
+    # once we have actually asked the API.
+    hdr = ("", "NAME", "EMAIL", "PLAN")
+    if verify:
+        hdr += ("STATE",)
+    if long_:
+        hdr += ("TOKEN", "SAVED")
+    rows = []
+    for n in names:
+        blk = profiles[n].get(OAUTH_KEY, {})
+        row = (
+            "*" if n == cur else " ",
+            n,
+            profiles[n].get("email") or "?",
+            profiles[n].get("plan") or "?",
+        )
+        if verify:
+            row += (token_state(blk, idents.get(n, {})),)
+        if long_:
+            row += (expiry_note(blk), (profiles[n].get("savedAt") or "")[:10])
+        rows.append(row)
+    print_table(hdr, rows, {i for i, n in enumerate(names) if n == cur})
 
     for n in names:
         warn = refresh_warning(profiles[n].get(OAUTH_KEY, {}))
@@ -732,6 +805,50 @@ def cmd_list(verify=False, as_json=False, **_):
             f"\n{YELLOW}note:{OFF} the current login does not match any saved account. "
             f"Save it with:  {PROG} save <name>"
         )
+
+
+def cmd_pick(yes=False, no_sync=False, verify=False, as_json=False, long_=False, **_):
+    """`hop` with nothing after it: show the accounts and offer to switch.
+
+    The tool exists to answer one question - which account? - so ask it, instead
+    of printing a table and making you retype a name out of it. Falls back to a
+    plain listing when there is nothing to choose between, or when stdout is a
+    pipe and there is nobody there to answer.
+    """
+    names = list_profiles()
+    if len(names) < 2 or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        cmd_list(verify=verify, as_json=as_json, long_=long_)
+        return
+
+    profiles = {n: load_profile(n) for n in names}
+    cur = active_name()
+    rows = [
+        (f"{i}. *" if n == cur else f"{i}.", n,
+         profiles[n].get("email") or "?", profiles[n].get("plan") or "?")
+        for i, n in enumerate(names, 1)
+    ]
+    print_table(("", "NAME", "EMAIL", "PLAN"), rows,
+                {i for i, n in enumerate(names) if n == cur})
+    try:
+        answer = input(f"\nhop to which? [1-{len(names)}, Enter to stay] ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if not answer:
+        return
+
+    if answer.isdigit() and 1 <= int(answer) <= len(names):
+        chosen = names[int(answer) - 1]
+    else:  # a name, or enough of one to be unambiguous
+        hits = [n for n in names if n == answer] or [n for n in names if n.startswith(answer)]
+        if len(hits) != 1:
+            die(f"'{answer}' is not one of them. Pick a number, or a name.", USAGE_EXIT)
+        chosen = hits[0]
+
+    if chosen == cur:
+        print(f"already on {GREEN}{chosen}{OFF}")
+        return
+    cmd_use(name=chosen, yes=yes, no_sync=no_sync)
 
 
 def cmd_active(as_json=False, **_):
@@ -848,45 +965,134 @@ def cmd_add(name=None, yes=False, **_):
     if not name:
         die(f"usage: {PROG} add <name>", USAGE_EXIT)
     check_name(name)
-    if os.path.exists(profile_path(name)) and not confirm(f"'{name}' already exists - replace it?", yes):
+    target = profile_path(name)
+    # Kept in memory so a replace that turns out to be the wrong account can be
+    # undone without leaving a .bak behind for `doctor` to complain about.
+    prior = read_json(target) if os.path.exists(target) else None
+    if prior is not None and not confirm(f"'{name}' already exists - replace it?", yes):
         die("aborted")
     if not shutil.which("claude"):
         die("`claude` is not on your PATH, so I can't drive the login. Install Claude Code first.")
     if not sys.stdin.isatty():
         die(f"adding an account needs a terminal - run `{PROG} add {name}` from one.")
 
-    live = live_oauth()
-    if live:
-        where = sync_live_before_switch(live)
-        info(f"{DIM}saved the current login ({where}) before logging out{OFF}")
+    # A running session writes its own refreshed token into the credential store
+    # without warning, which lands the wrong account under `name`. That is much
+    # easier to prevent than to explain afterwards.
+    pids = running_claude_pids()
+    if pids and not yes:
+        die(
+            f"quit your other claude session(s) first - pid {', '.join(map(str, pids))}.\n"
+            f"       While you are logging in, any one of them can write its own token back "
+            f"into the credential store, and '{name}' would end up holding that account "
+            f"instead.\n       Run with --yes to go ahead anyway."
+        )
 
-    warn_running()
+    live = live_oauth()
+    prev_name = None
+    if live:
+        prev_name = sync_live_before_switch(live)
+        info(f"{DIM}saved the current login ({prev_name}) before logging out{OFF}")
+
     clear_live_oauth()
     info(f"\nStarting `claude` with no login. Sign in as the {BOLD}{name}{OFF} account")
-    info("(use /login if it does not prompt), then exit with /exit or Ctrl-D.\n")
+    info("(use /login if it does not prompt), then exit with /exit or Ctrl-D.")
+    info(
+        f"{DIM}Your browser is already signed in as one of your other accounts. Paste the\n"
+        f"login URL into a private window, or you will just re-authorise that one.{OFF}\n"
+    )
 
     new: dict | None = None
-    same = False
-    try:
-        subprocess.call(["claude"])
-    finally:
-        new = live_oauth()
-        same = bool(live and new and new.get("accessToken") == live.get("accessToken"))
-        if (not new or same) and live:
-            # Nothing new was signed in - put back what was there. This also
-            # covers Ctrl-C: never leave the user logged out of everything.
-            set_live_oauth(live)
+    persisted = False
 
-    if not new or same:
+    def persist() -> bool:
+        """Write whatever `claude` produced to disk. Idempotent.
+
+        Deliberately does no network call first. Looking the account's email up
+        takes up to CLAUDE_HOP_TIMEOUT seconds, and an interrupt anywhere in that
+        window used to lose a credential that had already been issued - you were
+        left logged in as an account with nothing saved for it. The identity
+        lookup happens after the token is safely on disk; `list --verify` fills
+        in an email that never made it.
+        """
+        nonlocal new, persisted
+        if persisted:
+            return True
+        found = live_oauth()
+        if not found or (live and found.get("accessToken") == live.get("accessToken")):
+            # Nothing new was signed in - put back what was there. Never leave
+            # the user logged out of everything.
+            if live:
+                set_live_oauth(live)
+            return False
+        new = found
+        # A replaced profile must not keep the old account's email and plan
+        # against the new account's token, even if we get killed right here.
+        stale = dict.fromkeys(("email", "plan", "accountUuid", "org")) if prior else {}
+        save_profile(name, found, stale)
+        set_active_ptr(name)
+        persisted = True
+        return True
+
+    old_signals = _guard_child_signals()
+    hung_up = False
+    try:
+        try:
+            subprocess.call(["claude"])
+        except _TerminalGone:
+            hung_up = True
+    finally:
+        try:
+            saved = persist()
+        finally:
+            _restore_signals(old_signals)
+
+    if not saved:
         info(f"{YELLOW}no new login found after that.{OFF} Nothing saved for '{name}'.")
-        prev = active_name()
-        info("Your previous login was restored" + (f" ({prev})." if prev else "."))
+        if prior is not None:
+            info(f"The existing '{name}' profile was left as it was.")
+        if live:
+            prev = active_name()
+            info("Your previous login was restored" + (f" ({prev})." if prev else "."))
+        else:
+            info("You were not logged in before either, so you still are not.")
         sys.exit(1)
 
     ident = identity(new)
-    save_profile(name, new, {k: v for k, v in ident.items() if k != "tokenState"})
-    set_active_ptr(name)
+
+    # A `claude` session that was already running refreshes its own token
+    # straight into the credential store, and that block is not the login we
+    # asked for. Saving it under `name` would file one account's live credential
+    # under another account's name.
+    prev_uuid = (
+        read_json(profile_path(prev_name)).get("accountUuid")
+        if prev_name and prev_name != name
+        else None
+    )
+    if prev_uuid and ident.get("accountUuid") == prev_uuid:
+        if prior is not None:
+            write_json_secure(target, prior)
+        else:
+            os.remove(target)
+        save_profile(prev_name, new, {})  # it is a newer token for that account
+        set_active_ptr(prev_name)
+        die(
+            f"the credential store holds {ident.get('email') or prev_name} again, not a new "
+            f"login - another running claude session refreshed it while we waited. Nothing "
+            f"saved for '{name}'. Quit every claude session, then try again."
+        )
+
+    meta = {k: v for k, v in ident.items() if k != "tokenState"}
+    if meta:
+        save_profile(name, new, meta)
     print(f"saved and now active: {GREEN}{name}{OFF} ({ident.get('email') or 'email unknown'})")
+    if not ident.get("accountUuid"):
+        info(
+            f"{YELLOW}note:{OFF} could not confirm which account that is, so '{name}' has no "
+            f"email or plan recorded. Fill them in with:  {PROG} list --verify"
+        )
+    if hung_up:
+        info(f"{DIM}(the terminal went away, but the login was saved){OFF}")
 
 
 def cmd_rm(name=None, yes=False, **_):
@@ -1059,6 +1265,7 @@ READ_ONLY = {cmd_list, cmd_whoami, cmd_active, cmd_help, cmd_version}
 FLAGS = {
     "-y": "yes", "--yes": "yes",
     "--verify": "verify",
+    "--long": "long_", "-l": "long_",
     "--no-sync": "no_sync",
     "--json": "as_json",
     "--fix": "fix",
@@ -1067,8 +1274,8 @@ FLAGS = {
 
 
 def main(argv: list[str]):
-    flags = {"yes": False, "verify": False, "no_sync": False, "as_json": False,
-             "fix": False, "no_color": False}
+    flags = {"yes": False, "verify": False, "long_": False, "no_sync": False,
+             "as_json": False, "fix": False, "no_color": False}
     args: list[str] = []
     only_positional = False
     for a in argv:
@@ -1082,6 +1289,16 @@ def main(argv: list[str]):
             die(f"unknown option '{a}'. Try: {PROG} help", USAGE_EXIT)
         else:
             args.append(a)
+
+    # Bare `hop` in a terminal asks which account you want; everywhere else -
+    # a pipe, --json, a statusline - it stays a plain listing, and takes no lock.
+    if not args and not flags["as_json"]:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            with lock():
+                cmd_pick(**flags)
+        else:
+            cmd_list(**flags)
+        return
 
     cmd = args[0] if args else "list"
     fn = COMMANDS.get(cmd)

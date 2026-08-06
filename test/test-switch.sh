@@ -44,6 +44,7 @@ import json, os
 d = os.environ['CLAUDE_ACCOUNTS_DIR']
 for n, t, u in (('alpha', 'tok-A', 'uuid-A'), ('beta', 'tok-B', 'uuid-B')):
     json.dump({"name": n, "email": f"{n}@x.com", "plan": "max", "accountUuid": u,
+               "savedAt": "2026-01-02T03:04:05+0900",
                "claudeAiOauth": {"accessToken": t, "refreshToken": "r-" + n,
                                  "expiresAt": 99999999999999}},
               open(f"{d}/{n}.json", "w"))
@@ -103,22 +104,28 @@ is "active prints just the name"     "$("$HOP" active 2>/dev/null)" "beta"
 
 # --- 5. table layout ----------------------------------------------------------
 # Colour codes inside a cell used to be counted as width, so an expired token
-# knocked every later column out of line.
+# knocked every later column out of line. The coloured cell lives in --long.
+seed                                    # two rows, both with the same savedAt
 python3 -c "
 import json,os
 d=os.environ['CLAUDE_ACCOUNTS_DIR']+'/alpha.json'; p=json.load(open(d))
 p['claudeAiOauth']['expiresAt']=1000; json.dump(p,open(d,'w'))"
 strip_ansi() { python3 -c 'import re,sys;sys.stdout.write(re.sub("\033\\[[0-9;]*m","",sys.stdin.read()))'; }
-plan_cols() {  # column where the PLAN cell starts, one number per data row
-  CLICOLOR_FORCE=1 "$HOP" list 2>/dev/null \
+saved_cols() {  # column where the SAVED cell starts, one number per data row
+  # NO_COLOR is exported for the whole suite and _use_color() checks it before
+  # CLICOLOR_FORCE, so it has to come off here or there is no colour to test.
+  env -u NO_COLOR CLICOLOR_FORCE=1 "$HOP" list --long 2>/dev/null \
     | strip_ansi | tail -n +2 \
-    | awk '{print index($0,"max")}' | sort -u | tr '\n' ' '
+    | awk '{print match($0, /20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)}' | sort -u | tr '\n' ' '
 }
-[ "$(plan_cols | wc -w)" -eq 1 ] \
+[ "$(saved_cols | wc -w)" -eq 1 ] \
   && ok "columns line up even with colour in a cell" \
-  || bad "columns line up even with colour in a cell" "PLAN starts at columns: $(plan_cols)"
-CLICOLOR_FORCE=1 "$HOP" list 2>/dev/null | grep -q 'expired' \
-  && ok "an expired token is called out" || bad "an expired token is called out" "no 'expired' in the table"
+  || bad "columns line up even with colour in a cell" "SAVED starts at columns: $(saved_cols)"
+env -u NO_COLOR CLICOLOR_FORCE=1 "$HOP" list --long 2>/dev/null | grep -q 'expired' \
+  && ok "an expired token is called out" || bad "an expired token is called out" "no 'expired' in --long"
+"$HOP" list 2>/dev/null | grep -q 'expired' \
+  && bad "the plain listing stays free of token bookkeeping" "'expired' leaked into the default view" \
+  || ok "the plain listing stays free of token bookkeeping"
 
 # --- 6. json output -----------------------------------------------------------
 seed
@@ -255,13 +262,14 @@ print(d['mcpOAuth']['vercel|x']['accessToken'])")" "vca_KEEPME"
   && ok "keychain backend never writes the credentials file" || bad "keychain backend never writes the credentials file" "file exists"
 is "keychain backend reports itself" "$(kc doctor --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["backend"])')" "keychain"
 
-# --- 12. `add` never leaves you logged out ------------------------------------
+# --- 12. `add` never leaves you logged out, and never loses a login ----------
 # `add` clears the live credentials before handing you to `claude` for /login.
 # If that produces nothing — no `claude`, an immediate exit, Ctrl-C — the old
-# credentials must come back. Driven in-process: it needs a tty and a `claude`,
-# and faking both with a pty hangs on some platforms.
-add_with() {  # add_with <python body for the fake `claude` run>
-  HOP="$HOP" FAKE_CLAUDE="$1" python3 - <<'PY' >/dev/null 2>&1
+# credentials must come back. If it DOES produce a login, that login must reach
+# disk even when the process is being torn down. Driven in-process: it needs a
+# tty and a `claude`, and faking both with a pty hangs on some platforms.
+add_with() {  # add_with <python body for the fake `claude` run> [name] [identity dict]
+  HOP="$HOP" FAKE_CLAUDE="$1" ADD_NAME="${2:-gamma}" FAKE_IDENT="${3:-}" python3 - <<'PY' >/dev/null 2>&1
 import importlib.machinery, importlib.util, json, os, sys
 
 loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
@@ -273,13 +281,22 @@ class Tty:                      # cmd_add insists on a real terminal
         return True
 sys.stdin = Tty()
 ca.shutil.which = lambda cmd: "/bin/true"
-ca.subprocess.call = lambda *a, **k: exec(os.environ["FAKE_CLAUDE"], {"ca": ca, "json": json})
+ca.subprocess.call = lambda *a, **k: exec(
+    os.environ["FAKE_CLAUDE"], {"ca": ca, "json": json}
+)
+if os.environ["FAKE_IDENT"]:
+    # The suite runs offline, so identity() normally answers "not checked".
+    # Some paths need it to name an account.
+    ident = json.loads(os.environ["FAKE_IDENT"])
+    ca.identity = lambda blk: dict(ident)
 try:
-    ca.cmd_add(name="gamma", yes=True)
-except SystemExit:
+    ca.cmd_add(name=os.environ["ADD_NAME"], yes=True)
+except BaseException:           # incl. the simulated teardown signals
     pass
 PY
 }
+
+login_new='ca.set_live_oauth({"accessToken": "tok-NEW", "expiresAt": 99999999999999})'
 
 seed
 add_with 'pass'                                  # `claude` exits, nobody logs in
@@ -288,14 +305,183 @@ is "a failed add restores the previous login" "$(live_token)" "tok-A"
   && ok "a failed add saves no profile" || bad "a failed add saves no profile" "gamma.json exists"
 
 seed
-add_with 'raise KeyboardInterrupt'               # Ctrl-C at the login prompt
-is "Ctrl-C during add restores the previous login" "$(live_token)" "tok-A"
+add_with 'raise KeyboardInterrupt'               # torn down before logging in
+is "an interrupted add restores the previous login" "$(live_token)" "tok-A"
 
 seed
-add_with 'ca.set_live_oauth({"accessToken": "tok-NEW", "expiresAt": 99999999999999})'
+add_with "$login_new"
 is "a real login is saved under the new name" "$(saved_token gamma)" "tok-NEW"
 is "the new account becomes active"           "$(cat "$CLAUDE_ACCOUNTS_DIR/active")" "gamma"
 is "the account we were on was saved first"   "$(saved_token alpha)" "tok-A"
+
+# The bug this section exists for: the login had already happened, and the save
+# sat outside the cleanup path, so a Ctrl-C or a closed terminal threw it away.
+seed
+add_with "$login_new; raise KeyboardInterrupt"
+is "a login is saved even if we are interrupted after it" "$(saved_token gamma)" "tok-NEW"
+is "...and the new account is still marked active" "$(cat "$CLAUDE_ACCOUNTS_DIR/active")" "gamma"
+
+seed
+add_with "$login_new; raise ca._TerminalGone(1)"   # SIGHUP: terminal closed
+is "a login survives the terminal closing" "$(saved_token gamma)" "tok-NEW"
+
+# Replacing an existing profile must not damage it when the login fails, and
+# must not leave the old account's email attached to a new account's token.
+seed
+add_with 'pass' beta
+is "a failed replace leaves the old profile alone" "$(saved_token beta)" "tok-B"
+seed
+add_with "$login_new" beta
+is "a replace stores the new token"      "$(saved_token beta)" "tok-NEW"
+is "a replace drops the stale email"     "$(jget "$CLAUDE_ACCOUNTS_DIR/beta.json" email)" "None"
+
+# A claude session that was already running can refresh the PREVIOUS account's
+# token into the store while we wait. That is not a new login, and filing it
+# under the new name would label alpha's live credential as 'gamma'.
+seed
+add_with 'ca.set_live_oauth({"accessToken": "tok-A-refreshed", "expiresAt": 99999999999999})' \
+         gamma '{"accountUuid": "uuid-A", "email": "alpha@x.com", "tokenState": "ok"}'
+[ ! -e "$CLAUDE_ACCOUNTS_DIR/gamma.json" ] \
+  && ok "a refresh race is not saved as a new account" \
+  || bad "a refresh race is not saved as a new account" "gamma.json exists"
+is "a refresh race is filed under the right account" "$(saved_token alpha)" "tok-A-refreshed"
+is "a refresh race leaves that account active" "$(cat "$CLAUDE_ACCOUNTS_DIR/active")" "alpha"
+
+# ...but re-adding the SAME account under its own name is legitimate.
+seed
+add_with 'ca.set_live_oauth({"accessToken": "tok-A-refreshed", "expiresAt": 99999999999999})' \
+         alpha '{"accountUuid": "uuid-A", "email": "alpha@x.com", "tokenState": "ok"}'
+is "re-adding the same account under its own name works" "$(saved_token alpha)" "tok-A-refreshed"
+
+# --- 12b. the child must not inherit our signal handling ---------------------
+# The parent stops reacting to SIGINT while `claude` runs (in Claude Code Ctrl-C
+# cancels a turn, it does not quit, so unwinding on the first one is wrong). If
+# that were done with SIG_IGN it would survive exec and `claude` itself would go
+# deaf to Ctrl-C. Run a real child and read its actual signal mask.
+if [ -r /proc/self/status ]; then
+  cat > "$TMP/bin/claude" <<'FAKE'
+#!/usr/bin/env python3
+import json, os, re
+status = open("/proc/self/status").read()
+ign = int(re.search(r"^SigIgn:\s*([0-9a-f]+)", status, re.M).group(1), 16)
+open(os.environ["SIGREPORT"], "w").write(str(ign))
+json.dump({"claudeAiOauth": {"accessToken": "tok-NEW", "expiresAt": 99999999999999}},
+          open(os.environ["CLAUDE_CONFIG_DIR"] + "/.credentials.json", "w"))
+FAKE
+  chmod +x "$TMP/bin/claude"
+  seed
+  SIGREPORT="$TMP/sigign" PATH="$TMP/bin:$PATH" HOP="$HOP" python3 - <<'PY' >/dev/null 2>&1
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+class Tty:
+    def isatty(self):
+        return True
+sys.stdin = Tty()
+try:
+    ca.cmd_add(name="gamma", yes=True)
+except SystemExit:
+    pass
+PY
+  sigign="$(cat "$TMP/sigign" 2>/dev/null || echo missing)"
+  if [ "$sigign" = missing ]; then
+    bad "the child reports its signal mask" "fake claude never ran"
+  else
+    [ $(( sigign & 2 )) -eq 0 ] \
+      && ok "the child still sees Ctrl-C (SIGINT not inherited as ignored)" \
+      || bad "the child still sees Ctrl-C" "SigIgn=$sigign has SIGINT set"
+    [ $(( sigign & 1 )) -eq 0 ] \
+      && ok "the child still sees SIGHUP" \
+      || bad "the child still sees SIGHUP" "SigIgn=$sigign has SIGHUP set"
+  fi
+  is "a login through a real child is saved" "$(saved_token gamma)" "tok-NEW"
+  rm -f "$TMP/bin/claude"
+fi
+
+# --- 12c. `add` refuses to run alongside a live session ----------------------
+# A running session rewrites the credential store on its own schedule, so the
+# only reliable answer is not to start. It must refuse before clearing anything.
+guarded_add() {  # guarded_add <yes>
+  HOP="$HOP" ADD_YES="$1" python3 - <<'PY' >/dev/null 2>&1
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+class Tty:
+    def isatty(self):
+        return True
+sys.stdin = Tty()
+ca.shutil.which = lambda cmd: "/bin/true"
+ca.running_claude_pids = lambda: [4242]
+ca.subprocess.call = lambda *a, **k: ca.set_live_oauth(
+    {"accessToken": "tok-NEW", "expiresAt": 99999999999999})
+try:
+    ca.cmd_add(name="gamma", yes=os.environ["ADD_YES"] == "yes")
+except BaseException:
+    pass
+PY
+}
+
+seed
+guarded_add no
+is "add refuses while a claude session is running" "$(live_token)" "tok-A"
+[ ! -e "$CLAUDE_ACCOUNTS_DIR/gamma.json" ] \
+  && ok "a refused add writes nothing" || bad "a refused add writes nothing" "gamma.json exists"
+seed
+guarded_add yes
+is "--yes overrides the running-session stop" "$(saved_token gamma)" "tok-NEW"
+
+# --- 12d. bare `hop` picks an account ----------------------------------------
+# The everyday path: run it with no arguments, answer the prompt.
+pick_with() {  # pick_with <what the user types at the prompt>
+  HOP="$HOP" ANSWER="$1" python3 - <<'PY' >/dev/null 2>&1
+import builtins, importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+class Tty:                      # cmd_pick only prompts on a terminal
+    def isatty(self):
+        return True
+    def write(self, s):
+        return len(s)
+    def flush(self):
+        pass
+sys.stdin = sys.stdout = Tty()
+builtins.input = lambda prompt="": os.environ["ANSWER"]
+try:
+    ca.cmd_pick(yes=True)
+except SystemExit:
+    pass
+PY
+}
+
+seed                                   # accounts sort alpha, beta; alpha active
+pick_with 2
+is "picking a number switches"        "$(live_token)" "tok-B"
+is "picking a number moves the pointer" "$(cat "$CLAUDE_ACCOUNTS_DIR/active")" "beta"
+
+seed
+pick_with ''
+is "Enter at the prompt stays put"    "$(live_token)" "tok-A"
+
+seed
+pick_with bet                          # a name, or enough of one
+is "picking by name prefix switches"  "$(live_token)" "tok-B"
+
+seed
+pick_with 9
+is "an out-of-range pick changes nothing" "$(live_token)" "tok-A"
+
+# Nobody is there to answer a prompt in a pipe, so it stays a listing.
+seed
+out="$("$HOP" 2>/dev/null)"
+printf '%s' "$out" | grep -q 'NAME' \
+  && ok "bare hop in a pipe still lists" || bad "bare hop in a pipe still lists" "no table: $out"
+printf '%s' "$out" | grep -qi 'which' \
+  && bad "bare hop in a pipe does not prompt" "prompted anyway" \
+  || ok "bare hop in a pipe does not prompt"
+is "bare hop in a pipe switches nothing" "$(live_token)" "tok-A"
 
 # --- 13. unit checks on the tricky helpers ------------------------------------
 unit() {  # unit <name> <python expression> <expected>
