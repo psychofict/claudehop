@@ -3,6 +3,49 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [1.2.1] — 2026-08-06
+
+### Changed
+
+- **`hop` on its own now asks which account you want.** It prints the list
+  numbered and switches to the one you pick; Enter leaves you where you are. You
+  no longer have to read a table and then retype a name out of it. Piped output,
+  `--json` and a single saved account all still get the plain listing, so
+  statuslines and scripts are unaffected.
+- **The default listing is name, email and plan.** Token expiry and save dates
+  moved behind `--long`. `expired (auto-renews)` under `TOKEN` needed a paragraph
+  of README to be readable and was the most-misread thing the tool printed; it is
+  not something you need in order to choose an account.
+- **`add` stops if other `claude` sessions are running** instead of warning and
+  carrying on into a corrupted result. `--yes` overrides it.
+- **`add` tells you to use a private browser window** before it hands you to
+  `/login`, rather than leaving it in the README's gotchas.
+- `help` leads with the three commands you actually use and lists the rest below.
+
+### Fixed
+
+- **`add` could lose a login it had already completed.** The new credential was
+  read inside the cleanup path but written to disk after it, with an API call for
+  the account's email in between. Anything that ended the process in that window
+  — Ctrl-C, closing the terminal, the identity lookup being cut short — left you
+  logged in as an account with no profile saved for it. The token is now written
+  first and the email filled in afterwards, so an interrupted `add` still leaves
+  a usable profile. Recover one from an older version with `claudehop save <name>`
+  while that login is still live.
+- **`add` no longer unwinds on the first Ctrl-C.** In Claude Code, Ctrl-C cancels
+  the current turn rather than quitting, so `add` used to start cleaning up while
+  `claude` was still running and still writing to the credential store. It now
+  ignores SIGINT while the child runs, the way a shell does, and lets `claude`
+  decide when to exit. SIGHUP and SIGTERM are turned into a clean unwind instead
+  of killing the process outright.
+- **`add` no longer files one account's credential under another account's
+  name.** A `claude` session that was already running writes its own refreshed
+  token into the credential store, and `add` would save that as the new account.
+  It now checks the account UUID before keeping the profile, and puts a refreshed
+  token back where it belongs instead.
+- **Replacing an existing account no longer keeps the old email and plan** next
+  to the new account's token.
+
 ## [1.2.0] — 2026-08-05
 
 ### Changed

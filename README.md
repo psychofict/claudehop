@@ -5,21 +5,28 @@ Hop Claude Code between several Claude accounts without logging in again.
 [![CI](https://github.com/psychofict/claudehop/actions/workflows/ci.yml/badge.svg)](https://github.com/psychofict/claudehop/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 
-```
-$ hop
-   NAME  EMAIL           PLAN  TOKEN    SAVED
-   home  me@gmail.com    max   5h left  2026-08-03
-*  work  me@company.com  team  7h left  2026-08-03
-
-$ hop home
-switched to home (me@gmail.com, max)
-```
-
 Personal Max account in one terminal, work Team seat in another — two separate
 usage pools, one machine, no browser round-trip to move between them.
 
-One Python file, standard library only. Nothing to build, nothing to install
-from a package registry.
+## Switching accounts
+
+Run `hop`, press a number.
+
+```
+$ hop
+      NAME  EMAIL           PLAN
+1.    home  me@gmail.com    max
+2. *  work  me@company.com  team
+
+hop to which? [1-2, Enter to stay] 1
+switched to home (me@gmail.com, max)
+```
+
+Then start a new `claude`. That's it — that's the whole tool.
+
+If you'd rather not read a menu, `hop home` goes straight there. Sessions you
+already have open keep the account they started with; only new ones pick up the
+change.
 
 ## Install
 
@@ -29,7 +36,7 @@ cd claudehop
 ./install.sh          # symlinks into ~/.claude, adds one line to your rc file
 ```
 
-Then open a new terminal.
+Then open a new terminal. `hop` and `claudehop` are the same command.
 
 `./install.sh --copy` installs copies instead of symlinks, `--no-rc` skips the
 shell wiring, `--uninstall` reverses it. None of them ever touch
@@ -37,29 +44,43 @@ shell wiring, `--uninstall` reverses it. None of them ever touch
 
 Requires Python 3.9+ and Claude Code. Linux and macOS.
 
-## Use
+## Adding an account
 
 ```bash
-claudehop                  # list saved accounts, * marks the active one
-claudehop add work         # log in as a new account and save it
-claudehop use work         # switch — or just: claudehop work
-claudehop whoami           # who am I right now (asks the API)
-claudehop active           # just the active account name, no network
-claudehop list --verify    # check every saved token against the API
-claudehop save <name>      # save the current login under a name
-claudehop sync             # push the live login back into its saved file
-claudehop rm <name>        # delete a saved account (does not log you out)
-claudehop rename <a> <b>
-claudehop doctor           # check the setup; --fix repairs what it can
+hop add work
+```
+
+Quit your other `claude` sessions first — `add` will stop and tell you if you
+haven't, because a session left running can write its own token back into the
+credential store mid-login and you'd end up with the wrong account saved under
+that name.
+
+`add` then starts `claude` with no login so you can `/login`, and saves whatever
+that produces when you exit with `/exit`. **Paste the login URL into a private
+browser window.** Your normal browser is already signed in as one of your other
+accounts and will authorise that one without asking.
+
+If the login produces nothing — you changed your mind, you hit Ctrl-C — your
+previous credentials come back. If it does produce a login, that login is saved
+even if the terminal dies on the way out.
+
+Already logged in by hand? `hop save work` names whatever is live right now.
+
+## Everything else
+
+```bash
+hop whoami           # who am I right now (asks the API)
+hop --long           # add token expiry and save dates to the listing
+hop list --verify    # check every saved token against the API
+hop rm <name>        # delete a saved account (does not log you out)
+hop rename <a> <b>
+hop doctor           # check the setup; --fix repairs what it can
 ```
 
 `--json` on `list`, `whoami`, `active` and `doctor` gives machine-readable
-output with no secrets in it, for scripts and statuslines.
-
-Adding an account runs `claude` for you so you can `/login`; on exit it saves
-whatever credentials that produced. If you already logged in by hand, just
-`claudehop save <name>`. If the login produces nothing — you changed your mind,
-you hit Ctrl-C — your previous credentials are put back.
+output with no secrets in it, for scripts and statuslines. `hop active` prints
+just the active name with no network call. `hop use <name>` is the long spelling
+of `hop <name>`, and `hop sync` writes the live login back to its own file.
 
 ## How it works
 
@@ -110,10 +131,11 @@ get back to a session you'd otherwise have to re-authenticate.
   Paste the URL into an incognito window to authenticate as a different account.
 - `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` in the environment override
   the saved login entirely. `whoami` and `doctor` warn when either is set.
-- `TOKEN` showing `expired (auto-renews)` is normal — the access token is short
-  lived and Claude Code renews it from the refresh token. `list --verify` prints
-  `stale (renews)` for the same reason. What actually matters is the refresh
-  token, and you get a warning a week before that one runs out.
+- `--long` showing `expired (auto-renews)` under `TOKEN` is normal — the access
+  token is short lived and Claude Code renews it from the refresh token.
+  `list --verify` prints `stale (renews)` for the same reason. What actually
+  matters is the refresh token, and you get a warning a week before that one runs
+  out. This is why the default listing doesn't show either of them.
 - Each account still has its own rate limits and its own terms. This moves your
   own logins between your own terminals; it is not a way to pool quota.
 
@@ -145,7 +167,7 @@ bin/claudehop              the tool (python3, stdlib only)
 shell/claudehop.sh           PATH, tab-completion, back-compat aliases
 extras/statusline-snippet.sh show the active account in the Claude Code statusline
 install.sh                   symlink/copy into ~/.claude, wire up the rc file
-test/test-switch.sh          62 checks against a throwaway config dir, no network
+test/test-switch.sh          87 checks against a throwaway config dir, no network
 ```
 
 ## Tests
@@ -158,7 +180,8 @@ Runs entirely inside a temp dir with fake credentials — it never reads or writ
 a real account, and never touches the network. Covers the swap, mcpOAuth
 preservation, token rotation, the stash path, concurrent switches, the macOS
 keychain backend (through a stand-in `security`), `add` rolling back a failed
-login, JSON output, table layout, housekeeping and file permissions.
+login, `add` surviving a teardown after a successful one, the refresh race, JSON
+output, table layout, housekeeping and file permissions.
 
 ## Contributing
 

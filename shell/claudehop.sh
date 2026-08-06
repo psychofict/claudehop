@@ -2,8 +2,8 @@
 # claudehop — shell glue. Sourced from your shell rc by install.sh.
 # The tool itself is ~/.claude/bin/claudehop.
 #
-#   claudehop                 list saved accounts (* = active)
-#   claudehop <name>          hop to that account
+#   claudehop                 show your accounts, pick one to hop to
+#   claudehop <name>          hop straight to that account
 #   claudehop add <name>      log in as a new account and save it
 #   claudehop whoami          who am I right now
 #
@@ -54,7 +54,7 @@ _claudehop_complete() {
       use|switch|rm|remove|delete|rename|mv|save|add|new|login)
         COMPREPLY=($(compgen -W "$names" -- "$cur")) ;;
       *)
-        COMPREPLY=($(compgen -W "--verify --yes --no-sync --json --fix --no-color" -- "$cur")) ;;
+        COMPREPLY=($(compgen -W "--verify --long --yes --no-sync --json --fix --no-color" -- "$cur")) ;;
     esac
   fi
 }
