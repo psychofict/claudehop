@@ -1,0 +1,6 @@
+# The wheel is one module. The sdist also carries the repo installer, the shell
+# glue it wires up, the statusline extra and the test suite.
+include LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md install.sh
+include shell/claudehop.sh
+include extras/statusline-snippet.sh
+include test/test-switch.sh

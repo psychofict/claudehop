@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claudehop"
+dynamic = ["version"]
+description = "Hop Claude Code between several Claude accounts without logging in again — swap the saved OAuth login in one keystroke, keep every account's usage pool separate."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Ebenworks", email = "hello@ebenworks.co" }]
+requires-python = ">=3.9"
+dependencies = []
+keywords = [
+    "claude", "claude-code", "anthropic", "account-switcher", "multi-account",
+    "oauth", "credentials", "keychain", "cli", "developer-tools",
+    "productivity", "shell", "terminal", "ai", "llm",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Version Control",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/psychofict/claudehop"
+Repository = "https://github.com/psychofict/claudehop"
+Changelog = "https://github.com/psychofict/claudehop/blob/master/CHANGELOG.md"
+Issues = "https://github.com/psychofict/claudehop/issues"
+Author = "https://ebenworks.co/"
+
+[project.scripts]
+claudehop = "claudehop:console_main"
+hop = "claudehop:console_main"
+
+# One module, no dependencies, stdlib only — that is the whole point of it.
+[tool.setuptools]
+py-modules = ["claudehop"]
+
+[tool.setuptools.dynamic]
+version = { attr = "claudehop.VERSION" }
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP"]

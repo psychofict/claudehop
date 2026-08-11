@@ -6,7 +6,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOP="$ROOT/bin/claudehop"
+HOP="$ROOT/claudehop.py"
 TMP="$(mktemp -d -t claudehop-test-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -595,6 +595,26 @@ is "upgrade keeps the user's own lines" "$(grep -c 'export BAR=2' "$rc")" "1"
 CLAUDE_CONFIG_DIR="$TMP/cfg" "$ROOT/install.sh" --uninstall --rc "$rc" >/dev/null 2>&1
 is "uninstall removes our line"  "$(grep -c 'claudehop' "$rc")" "0"
 is "uninstall keeps the rest"    "$(grep -c 'export' "$rc")" "2"
+
+# --- 16. shell-init, and the glue it has to agree with ------------------------
+init="$("$HOP" shell-init 2>/dev/null)"
+printf '%s' "$init" | bash -n - && ok "shell-init emits valid bash" || bad "shell-init emits valid bash" "$init"
+printf '%s' "$init" | grep -q "complete -F _claudehop_complete" \
+  && ok "shell-init wires up completion" || bad "shell-init wires up completion" "$init"
+printf '%s' "$init" | grep -q 'PATH' \
+  && bad "shell-init leaves PATH alone" "pip already put it there" || ok "shell-init leaves PATH alone"
+# The sourced glue keeps its own hand-written verb list. Drift between the two
+# is invisible until someone tabs for a command that is missing from one of them.
+missing="$(HOP="$HOP" ROOT="$ROOT" python3 - <<'PY'
+import os, re, subprocess
+init = subprocess.run([os.environ["HOP"], "shell-init"], capture_output=True, text=True).stdout
+glue = open(os.path.join(os.environ["ROOT"], "shell", "claudehop.sh")).read()
+emitted = set(re.search(r'compgen -W "([^"$]*)', init).group(1).split())
+declared = set(re.search(r"_claudehop_verbs='([^']*)'", glue).group(1).split())
+print(" ".join(sorted(emitted ^ declared)))
+PY
+)"
+is "the sourced glue completes the same verbs" "$missing" ""
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

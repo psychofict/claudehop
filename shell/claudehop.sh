@@ -1,6 +1,8 @@
 # shellcheck shell=bash
 # claudehop — shell glue. Sourced from your shell rc by install.sh.
-# The tool itself is ~/.claude/bin/claudehop.
+# The tool itself is ~/.claude/bin/claudehop (claudehop.py in the repo).
+# Installed with pip instead? Use `eval "$(claudehop shell-init)"` — same
+# completion, no PATH line, because pip already put the commands on your PATH.
 #
 #   claudehop                 show your accounts, pick one to hop to
 #   claudehop <name>          hop straight to that account
@@ -33,7 +35,7 @@ _claudehop_names() {
   done
 }
 
-_claudehop_verbs='list use add save whoami active sync rm rename doctor help'
+_claudehop_verbs='list use save add whoami active sync rm rename doctor shell-init help version'
 
 # --- completion ---------------------------------------------------------------
 if [ -n "${ZSH_VERSION:-}" ]; then

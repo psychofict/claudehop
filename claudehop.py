@@ -18,6 +18,7 @@ Now and then:
   hop rm <name>        delete a saved account (does not log you out)
   hop rename <old> <new>
   hop doctor [--fix]   check the setup, repair what it can
+  hop shell-init       shell glue for a pip install: eval "$(claudehop shell-init)"
 
 Flags:
 
@@ -60,7 +61,7 @@ import sys
 import textwrap
 import time
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 PROG = "claudehop"
 
 
@@ -1319,6 +1320,64 @@ def cmd_version(**_):
     print(f"{PROG} {VERSION}")
 
 
+# Second names for a command, kept working but not worth offering on TAB.
+ALIASES = {"ls", "current", "switch", "new", "login", "remove", "delete", "mv", "check"}
+
+
+# Verbs and flags worth completing. Built from the tables below at call time, so
+# a new command can't be added without tab-completion following it.
+def _completion_words() -> tuple[str, str]:
+    verbs = " ".join(k for k in COMMANDS if not k.startswith("-") and k not in ALIASES)
+    flags = " ".join(sorted(k for k in FLAGS if k.startswith("--")))
+    return verbs, flags
+
+
+def cmd_shell_init(**_):
+    """Print shell glue for a pip/pipx install: `eval "$(claudehop shell-init)"`.
+
+    The repo installer writes shell/claudehop.sh instead, which also puts
+    ~/.claude/bin on your PATH. A pip install already has the commands on the
+    PATH, so all this adds is the `hop` alias and tab-completion.
+    """
+    verbs, flags = _completion_words()
+    print(
+        textwrap.dedent(
+            f"""\
+            # {PROG} {VERSION} — add to your shell rc:  eval "$({PROG} shell-init)"
+            if [ -n "${{ZSH_VERSION:-}}" ]; then
+              autoload -Uz +X bashcompinit 2>/dev/null && bashcompinit 2>/dev/null
+            fi
+            alias hop='{PROG}'
+            _claudehop_names() {{
+              local d="${{CLAUDE_ACCOUNTS_DIR:-${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}/accounts}}" f n
+              for f in "$d"/*.json; do
+                [ -e "$f" ] || continue
+                n="${{f##*/}}"
+                printf '%s ' "${{n%.json}}"
+              done
+            }}
+            _claudehop_complete() {{
+              local cur prev names
+              cur="${{COMP_WORDS[COMP_CWORD]}}"
+              prev="${{COMP_WORDS[COMP_CWORD-1]}}"
+              names="$(_claudehop_names)"
+              if [ "$COMP_CWORD" -eq 1 ]; then
+                COMPREPLY=($(compgen -W "{verbs} $names" -- "$cur"))
+              else
+                case "$prev" in
+                  use|switch|rm|remove|delete|rename|mv|save|add|new|login)
+                    COMPREPLY=($(compgen -W "$names" -- "$cur")) ;;
+                  *)
+                    COMPREPLY=($(compgen -W "{flags}" -- "$cur")) ;;
+                esac
+              fi
+            }}
+            complete -F _claudehop_complete {PROG} hop 2>/dev/null
+            """
+        ).rstrip()
+    )
+
+
 COMMANDS = {
     "list": cmd_list, "ls": cmd_list,
     "use": cmd_use, "switch": cmd_use,
@@ -1330,12 +1389,13 @@ COMMANDS = {
     "rm": cmd_rm, "remove": cmd_rm, "delete": cmd_rm,
     "rename": cmd_rename, "mv": cmd_rename,
     "doctor": cmd_doctor, "check": cmd_doctor,
+    "shell-init": cmd_shell_init,
     "help": cmd_help, "-h": cmd_help, "--help": cmd_help,
     "version": cmd_version, "-V": cmd_version, "--version": cmd_version,
 }
 
 # Commands that only read; they skip the lock and never touch the store.
-READ_ONLY = {cmd_list, cmd_whoami, cmd_active, cmd_help, cmd_version}
+READ_ONLY = {cmd_list, cmd_whoami, cmd_active, cmd_help, cmd_version, cmd_shell_init}
 
 FLAGS = {
     "-y": "yes", "--yes": "yes",
@@ -1413,7 +1473,8 @@ def _run() -> int:
     return 0
 
 
-if __name__ == "__main__":
+def console_main() -> int:
+    """Entry point for the `claudehop` and `hop` commands, and for `python -m`."""
     try:
         code = _run()
         sys.stdout.flush()
@@ -1423,4 +1484,8 @@ if __name__ == "__main__":
         # `claudehop list | head` — say nothing, leave no traceback.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         code = 0
-    sys.exit(code)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(console_main())

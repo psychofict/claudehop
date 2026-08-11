@@ -1,0 +1,71 @@
+<!doctype html>
+<!-- Source for social-preview.png (the GitHub repo card). Regenerate with:
+     google-chrome --headless=new --hide-scrollbars --force-device-scale-factor=2 \
+       --window-size=1280,640 --screenshot=assets/social-preview.png \
+       file://$PWD/assets/social-preview.html                                   -->
+<meta charset="utf-8">
+<style>
+  :root {
+    --paper: #FAF8F4; --ink: #1D1009; --orange: #FC5F00; --muted: #595550;
+    --rule: #E5E1D8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1280px; height: 640px; background: var(--paper); }
+  body {
+    font-family: Inter, system-ui, sans-serif;
+    display: grid; grid-template-columns: 470px 1fr;
+    border-top: 10px solid var(--orange);
+  }
+
+  .mark { display: grid; place-content: center; gap: 6px; border-right: 1px solid var(--rule); }
+  .mark svg { display: block; }
+  .wordmark { font-size: 76px; font-weight: 800; letter-spacing: -3px; color: var(--ink); text-align: center; }
+  .wordmark span { color: var(--orange); }
+
+  .body { padding: 62px 64px 56px; display: flex; flex-direction: column; }
+  .eyebrow {
+    font-size: 19px; font-weight: 700; letter-spacing: 2.4px; color: var(--orange);
+    text-transform: uppercase;
+  }
+  .eyebrow b { color: var(--muted); font-weight: 700; }
+  h1 {
+    margin-top: 22px; font-size: 55px; line-height: 1.06; font-weight: 800;
+    letter-spacing: -2px; color: var(--ink);
+  }
+  h1 em { font-style: normal; color: var(--orange); }
+  ul { margin-top: 30px; list-style: none; display: grid; gap: 13px; }
+  li { font-size: 24px; color: var(--muted); font-weight: 500; letter-spacing: -0.3px; }
+  li::before { content: "→"; color: var(--orange); font-weight: 700; margin-right: 14px; }
+  .term {
+    margin-top: auto; background: var(--ink); color: #FAF8F4; border-radius: 14px;
+    padding: 20px 26px; font-family: "DejaVu Sans Mono", monospace; font-size: 26px;
+    letter-spacing: -0.5px;
+  }
+  .term i { color: var(--orange); font-style: normal; }
+  .repo { margin-top: 16px; font-size: 20px; color: var(--muted); font-weight: 500; }
+</style>
+
+<div class="mark">
+  <svg width="308" height="260" viewBox="0 0 380 320" fill="none">
+    <g stroke-linecap="round" stroke-linejoin="round" transform="translate(-64 -56)">
+      <path d="M148 226 C 170 92, 338 92, 360 205" stroke="#FC5F00" stroke-width="18"/>
+      <path d="M330 186 L390 186 L360 248 Z" fill="#FC5F00"/>
+      <rect x="96" y="248" width="104" height="104" rx="30" stroke="#1D1009" stroke-width="18"/>
+      <rect x="308" y="248" width="104" height="104" rx="30" fill="#1D1009"/>
+      <circle cx="360" cy="300" r="20" fill="#FC5F00"/>
+    </g>
+  </svg>
+  <div class="wordmark">claude<span>hop</span></div>
+</div>
+
+<div class="body">
+  <div class="eyebrow">Open source <b>· MIT · Python 3.9+</b></div>
+  <h1>One keystroke between<br>your <em>Claude accounts</em>.</h1>
+  <ul>
+    <li>Personal Max here, work Team seat there</li>
+    <li>Separate usage pools, one machine</li>
+    <li>No browser round-trip, no lost logins</li>
+  </ul>
+  <div class="term"><i>$</i> hop work &nbsp;<i>·</i>&nbsp; switched to work</div>
+  <div class="repo">github.com/psychofict/claudehop</div>
+</div>
