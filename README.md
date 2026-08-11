@@ -223,7 +223,7 @@ extras/statusline-snippet.sh show the active account in the Claude Code statusli
 install.sh                   symlink/copy into ~/.claude, wire up the rc file
 pyproject.toml               packaging: one module, no dependencies, two commands
 test/test-switch.sh          99 checks against a throwaway config dir, no network
-assets/                      cover and social-preview artwork
+assets/                      logo, icon, cover and social preview (svg sources + png)
 ```
 
 ## Tests

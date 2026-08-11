@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img"
+     aria-label="claudehop — hop Claude Code between accounts">
+  <title>claudehop</title>
+  <rect width="1024" height="1024" fill="#FAF8F4"/>
+
+  <!-- Mark, centred on the square: natural bbox (87,114)–(421,361) scaled 1.7. -->
+  <g transform="translate(80 -36) scale(1.7)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M148 226 C 170 92, 338 92, 360 205" fill="none" stroke="#FC5F00" stroke-width="18"/>
+    <path d="M330 186 L390 186 L360 248 Z" fill="#FC5F00"/>
+    <rect x="96" y="248" width="104" height="104" rx="30" fill="none" stroke="#1D1009" stroke-width="18"/>
+    <rect x="308" y="248" width="104" height="104" rx="30" fill="#1D1009"/>
+    <circle cx="360" cy="300" r="20" fill="#FC5F00"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="512" y="714" text-anchor="middle" font-family="Inter, 'Inter Display', system-ui, sans-serif"
+        font-size="146" font-weight="800" letter-spacing="-6" fill="#1D1009">claude<tspan fill="#FC5F00">hop</tspan></text>
+
+  <!-- Rule + tagline -->
+  <rect x="437" y="770" width="150" height="9" rx="4.5" fill="#FC5F00"/>
+  <text x="512" y="856" text-anchor="middle" font-family="Inter, system-ui, sans-serif"
+        font-size="41" font-weight="500" letter-spacing="-0.5" fill="#595550">Hop Claude Code between accounts</text>
+</svg>

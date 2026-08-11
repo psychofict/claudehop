@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img"
+     aria-label="claudehop">
+  <title>claudehop</title>
+  <rect width="512" height="512" fill="#FAF8F4"/>
+  <!-- The mark, scaled from its natural bounding box (87,114)–(421,361). -->
+  <g transform="translate(-36 -17) scale(1.15)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M148 226 C 170 92, 338 92, 360 205" fill="none" stroke="#FC5F00" stroke-width="18"/>
+    <path d="M330 186 L390 186 L360 248 Z" fill="#FC5F00"/>
+    <rect x="96" y="248" width="104" height="104" rx="30" fill="none" stroke="#1D1009" stroke-width="18"/>
+    <rect x="308" y="248" width="104" height="104" rx="30" fill="#1D1009"/>
+    <circle cx="360" cy="300" r="20" fill="#FC5F00"/>
+  </g>
+</svg>
