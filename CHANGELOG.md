@@ -3,6 +3,32 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [1.4.0] — 2026-08-11
+
+### Added
+
+- **Installs as a Python package.** `pyproject.toml` builds a wheel and an sdist
+  from the one module, and puts both `claudehop` and `hop` on your PATH:
+
+  ```bash
+  pipx install .
+  ```
+
+  Still no dependencies, still one file you can read in a sitting. `install.sh`
+  is unchanged and remains the way to get the shell glue with it.
+- **`claudehop shell-init`** prints the shell glue a packaged install needs —
+  the `hop` alias and tab-completion, without the PATH line the repo installer
+  writes. `eval "$(claudehop shell-init)"` in your rc file.
+
+### Changed
+
+- The tool moved from `bin/claudehop` to `claudehop.py` at the top of the repo,
+  so it can be both the installed script and the packaged module. `install.sh`,
+  `~/.claude/bin/claudehop` and every command name are unaffected.
+- Tab-completion now offers `shell-init` and `version`, and the completion list
+  is generated from the command table — a test fails if the sourced glue and the
+  packaged one drift apart.
+
 ## [1.3.0] — 2026-08-06
 
 ### Added

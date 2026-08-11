@@ -135,8 +135,8 @@ install_one() {  # src dst
   rm -f "$2"
   if [ "$MODE" = copy ]; then cp "$1" "$2"; else ln -s "$1" "$2"; fi
 }
-chmod 755 "$ROOT/bin/claudehop"
-install_one "$ROOT/bin/claudehop" "$BIN"
+chmod 755 "$ROOT/claudehop.py"
+install_one "$ROOT/claudehop.py" "$BIN"
 install_one "$ROOT/shell/claudehop.sh" "$GLUE"
 # The old command name keeps working as a shell function from the glue, so the
 # stale binary and glue from a claude-acct install just go.
@@ -165,7 +165,7 @@ fi
 
 echo
 echo "installed:"
-echo "  $BIN$([ "$MODE" = link ] && echo "  ->  $ROOT/bin/claudehop")"
+echo "  $BIN$([ "$MODE" = link ] && echo "  ->  $ROOT/claudehop.py")"
 echo "  $GLUE$([ "$MODE" = link ] && echo "  ->  $ROOT/shell/claudehop.sh")"
 echo
 if [ "$NO_RC" = 0 ]; then

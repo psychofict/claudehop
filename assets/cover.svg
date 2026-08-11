@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1340" height="460" viewBox="0 0 1340 460" role="img"
+     aria-label="claudehop — hop Claude Code between accounts">
+  <title>claudehop</title>
+
+  <!-- Ebenworks: paper #FAF8F4, ink #1D1009, orange #FC5F00 -->
+  <rect width="1340" height="460" fill="#FAF8F4"/>
+
+  <!-- The mark: the account you left, the hop, the one you land on. The dot in
+       the filled chip is the `*` the listing puts against the active row. -->
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <path d="M148 226 C 170 92, 338 92, 360 205" fill="none" stroke="#FC5F00" stroke-width="18"/>
+    <path d="M330 186 L390 186 L360 248 Z" fill="#FC5F00"/>
+    <rect x="96" y="248" width="104" height="104" rx="30" fill="none" stroke="#1D1009" stroke-width="18"/>
+    <rect x="308" y="248" width="104" height="104" rx="30" fill="#1D1009"/>
+    <circle cx="360" cy="300" r="20" fill="#FC5F00"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="500" y="252" font-family="Inter, 'Inter Display', system-ui, sans-serif"
+        font-size="150" font-weight="800" letter-spacing="-6" fill="#1D1009">claude<tspan fill="#FC5F00">hop</tspan></text>
+
+  <!-- Rule + tagline -->
+  <rect x="504" y="304" width="180" height="10" rx="5" fill="#FC5F00"/>
+  <text x="500" y="392" font-family="Inter, system-ui, sans-serif"
+        font-size="42" font-weight="500" letter-spacing="-0.6" fill="#595550">Hop Claude Code between accounts.</text>
+</svg>

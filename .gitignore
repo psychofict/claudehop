@@ -6,3 +6,8 @@ accounts/
 __pycache__/
 *.pyc
 .ruff_cache/
+
+# Build artefacts.
+build/
+dist/
+*.egg-info/

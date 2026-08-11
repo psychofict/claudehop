@@ -4,9 +4,10 @@ Thanks for looking. This is a small tool and it intends to stay small.
 
 ## The rules that keep it small
 
-1. **Python 3.9+, standard library only.** No dependencies, no build step, no
-   package registry. `bin/claudehop` must stay a single file you can read in
-   one sitting and run straight from a clone.
+1. **Python 3.9+, standard library only.** No dependencies, no build step.
+   `claudehop.py` must stay a single file you can read in one sitting and run
+   straight from a clone — `pyproject.toml` packages that one module and
+   nothing else.
 2. **Never lose a login.** Any code path that replaces the live credential must
    first write what was there into a profile. If you can't identify it, stash it
    under a generated name. Losing a token costs a browser round-trip and,
@@ -23,14 +24,14 @@ Thanks for looking. This is a small tool and it intends to stay small.
 git clone https://github.com/psychofict/claudehop.git
 cd claudehop
 ./install.sh              # symlinks, so your edits are live immediately
-./test/test-switch.sh     # 62 checks, about two seconds
+./test/test-switch.sh     # 99 checks, about two seconds
 ```
 
 Before opening a pull request:
 
 ```bash
 ./test/test-switch.sh
-ruff check bin/claudehop        # if you have it; CI runs it either way
+ruff check claudehop.py         # if you have it; CI runs it either way
 shellcheck install.sh shell/*.sh test/*.sh
 ```
 

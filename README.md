@@ -1,12 +1,29 @@
-# claudehop
+<p align="center">
+  <img src="https://raw.githubusercontent.com/psychofict/claudehop/master/assets/cover.png" alt="claudehop — hop Claude Code between accounts" width="560">
+</p>
 
-Hop Claude Code between several Claude accounts without logging in again.
+<h1 align="center">claudehop</h1>
 
-[![CI](https://github.com/psychofict/claudehop/actions/workflows/ci.yml/badge.svg)](https://github.com/psychofict/claudehop/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <b>Hop Claude Code between several Claude accounts without logging in again.</b><br>
+  Personal Max account in one terminal, work Team seat in another —
+  <i>two separate usage pools, one machine, no browser round-trip.</i>
+</p>
 
-Personal Max account in one terminal, work Team seat in another — two separate
-usage pools, one machine, no browser round-trip to move between them.
+<p align="center">
+  <a href="https://github.com/psychofict/claudehop/actions/workflows/ci.yml"><img src="https://github.com/psychofict/claudehop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/psychofict/claudehop/blob/master/LICENSE"><img src="https://img.shields.io/badge/licence-MIT-FC5F00.svg" alt="Licence: MIT"></a>
+  <img src="https://img.shields.io/badge/python-3.9%2B-1D1009.svg" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/dependencies-none-1D1009.svg" alt="No dependencies">
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="https://github.com/psychofict/claudehop/blob/master/CHANGELOG.md">Changelog</a> ·
+  <a href="https://github.com/psychofict/claudehop/blob/master/SECURITY.md">Security</a>
+</p>
+
+---
 
 ## Switching accounts
 
@@ -42,6 +59,14 @@ Then open a new terminal. `hop` and `claudehop` are the same command.
 shell wiring, `--uninstall` reverses it. None of them ever touch
 `~/.claude/accounts/`, where the credentials live.
 
+It's also a normal Python package if you'd rather manage it that way — one
+module, no dependencies:
+
+```bash
+pipx install .                      # both commands land on your PATH
+eval "$(claudehop shell-init)"      # optional: the `hop` alias + tab-completion
+```
+
 Requires Python 3.9+ and Claude Code. Linux and macOS.
 
 ## Adding an account
@@ -75,6 +100,7 @@ hop list --verify    # check every saved token against the API
 hop rm <name>        # delete a saved account (does not log you out)
 hop rename <a> <b>
 hop doctor           # check the setup; --fix repairs what it can
+hop shell-init       # shell glue for a pip install: alias + tab-completion
 ```
 
 `--json` on `list`, `whoami`, `active` and `doctor` gives machine-readable
@@ -184,17 +210,20 @@ already does to itself.
 
 Saved credentials are real, live Claude logins. `accounts/` is `700`, every
 profile is `600`, and writes are atomic. Nothing is ever sent anywhere except
-`api.anthropic.com` to resolve an email and plan. See [SECURITY.md](SECURITY.md)
+`api.anthropic.com` to resolve an email and plan. See
+[SECURITY.md](https://github.com/psychofict/claudehop/blob/master/SECURITY.md)
 for the threat model and how to report a problem.
 
 ## Files
 
 ```
-bin/claudehop              the tool (python3, stdlib only)
+claudehop.py                 the tool (python3, stdlib only)
 shell/claudehop.sh           PATH, tab-completion, back-compat aliases
 extras/statusline-snippet.sh show the active account in the Claude Code statusline
 install.sh                   symlink/copy into ~/.claude, wire up the rc file
-test/test-switch.sh          95 checks against a throwaway config dir, no network
+pyproject.toml               packaging: one module, no dependencies, two commands
+test/test-switch.sh          99 checks against a throwaway config dir, no network
+assets/                      cover and social-preview artwork
 ```
 
 ## Tests
@@ -212,8 +241,19 @@ output, table layout, housekeeping and file permissions.
 
 ## Contributing
 
-Issues and pull requests welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+Issues and pull requests welcome — see
+[CONTRIBUTING.md](https://github.com/psychofict/claudehop/blob/master/CONTRIBUTING.md).
+If `claudehop` saved you a browser round-trip this morning, a ⭐ on
+[GitHub](https://github.com/psychofict/claudehop) helps others find it.
 
 ## Licence
 
-MIT. Not affiliated with Anthropic.
+MIT. Not affiliated with, endorsed by, or sponsored by Anthropic. "Claude" and
+"Claude Code" are trademarks of Anthropic, PBC, used here only to say what this
+works with.
+
+---
+
+<p align="center">
+  Made by <a href="https://ebenworks.co/">Ebenworks</a>
+</p>

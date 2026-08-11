@@ -25,9 +25,36 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: compile
-        run: python3 -m py_compile bin/claudehop
+        run: python3 -m py_compile claudehop.py
       - name: test
         run: ./test/test-switch.sh
+
+  package:
+    name: build and install the package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.9"
+      - run: pip install build
+      - name: build sdist and wheel
+        run: python -m build
+      - name: install the wheel and run it
+        run: |
+          set -euo pipefail
+          pip install dist/*.whl
+          test "$(hop --version)" = "$(claudehop --version)"
+          hop --version | grep -qx "claudehop $(python -c 'import claudehop;print(claudehop.VERSION)')"
+          hop shell-init | bash -n -          # the glue it hands to pip users must parse
+          CLAUDE_HOP_OFFLINE=1 CLAUDE_CONFIG_DIR="$RUNNER_TEMP/c" hop doctor --json | python -c 'import json,sys;json.load(sys.stdin)'
+      - name: the sdist carries the installer and the tests
+        run: |
+          set -euo pipefail
+          tar tzf dist/*.tar.gz | grep -q 'install.sh'
+          tar tzf dist/*.tar.gz | grep -q 'test/test-switch.sh'
+          tar tzf dist/*.tar.gz | grep -q 'shell/claudehop.sh'
 
   lint:
     runs-on: ubuntu-latest
@@ -39,7 +66,7 @@ jobs:
           python-version: "3.13"
       - run: pip install ruff
       - name: ruff
-        run: ruff check --select=E,F,W,B,UP --line-length=110 --target-version=py39 bin/claudehop
+        run: ruff check claudehop.py
       - name: shellcheck
         run: shellcheck -S warning install.sh shell/claudehop.sh test/test-switch.sh
       - name: install and uninstall cleanly
