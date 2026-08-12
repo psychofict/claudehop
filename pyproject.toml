@@ -3,7 +3,10 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claudehop"
+# The commands, the module and the repo are all `claudehop`; the distribution
+# carries the -cli suffix because PyPI holds the bare name too close to an
+# unrelated `claude-hop` project and refuses it.
+name = "claudehop-cli"
 dynamic = ["version"]
 description = "Hop Claude Code between several Claude accounts without logging in again — swap the saved OAuth login in one keystroke, keep every account's usage pool separate."
 readme = "README.md"

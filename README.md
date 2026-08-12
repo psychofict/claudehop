@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/claudehop/"><img src="https://img.shields.io/pypi/v/claudehop.svg?color=FC5F00&label=pypi" alt="PyPI"></a>
+  <a href="https://pypi.org/project/claudehop-cli/"><img src="https://img.shields.io/pypi/v/claudehop-cli.svg?color=FC5F00&label=pypi" alt="PyPI"></a>
   <a href="https://github.com/psychofict/claudehop/actions/workflows/ci.yml"><img src="https://github.com/psychofict/claudehop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/psychofict/claudehop/blob/master/LICENSE"><img src="https://img.shields.io/badge/licence-MIT-FC5F00.svg" alt="Licence: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-1D1009.svg" alt="Python 3.9+">
@@ -49,12 +49,14 @@ change.
 ## Install
 
 ```bash
-pipx install claudehop              # or: pip install --user claudehop
+pipx install claudehop-cli          # or: pip install --user claudehop-cli
 eval "$(claudehop shell-init)"      # the `hop` alias + tab-completion
 ```
 
 Put that `eval` line in your `~/.bashrc` or `~/.zshrc` and open a new terminal.
-`hop` and `claudehop` are the same command.
+`hop` and `claudehop` are the same command. (The distribution carries the `-cli`
+suffix because PyPI holds the bare name too close to an unrelated project. The
+commands don't.)
 
 Or from a clone, if you'd rather have it symlinked into `~/.claude` with the
 shell glue written for you:

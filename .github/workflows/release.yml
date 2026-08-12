@@ -53,15 +53,18 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     environment:
       name: pypi
-      url: https://pypi.org/p/claudehop
-    permissions:
-      id-token: write # trusted publishing — no API token stored anywhere
+      url: https://pypi.org/p/claudehop-cli
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
+      # Swap this for `permissions: id-token: write` and drop the password once
+      # a trusted publisher is configured at pypi.org/manage/account/publishing.
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
 
   github-release:
     name: attach the build to the GitHub release
