@@ -7,11 +7,12 @@ This project follows [semantic versioning](https://semver.org/).
 
 ### Added
 
-- **On PyPI.** `claudehop` installs from the index and puts both `claudehop` and
-  `hop` on your PATH:
+- **On PyPI** as `claudehop-cli` — the bare name is held too close to an
+  unrelated project for PyPI to allow it; the commands are unchanged and still
+  `hop` and `claudehop`:
 
   ```bash
-  pipx install claudehop
+  pipx install claudehop-cli
   ```
 
   Still no dependencies, still one file you can read in a sitting. `install.sh`
