@@ -11,6 +11,7 @@
 </p>
 
 <p align="center">
+  <a href="https://pypi.org/project/claudehop/"><img src="https://img.shields.io/pypi/v/claudehop.svg?color=FC5F00&label=pypi" alt="PyPI"></a>
   <a href="https://github.com/psychofict/claudehop/actions/workflows/ci.yml"><img src="https://github.com/psychofict/claudehop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/psychofict/claudehop/blob/master/LICENSE"><img src="https://img.shields.io/badge/licence-MIT-FC5F00.svg" alt="Licence: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-1D1009.svg" alt="Python 3.9+">
@@ -48,26 +49,28 @@ change.
 ## Install
 
 ```bash
+pipx install claudehop              # or: pip install --user claudehop
+eval "$(claudehop shell-init)"      # the `hop` alias + tab-completion
+```
+
+Put that `eval` line in your `~/.bashrc` or `~/.zshrc` and open a new terminal.
+`hop` and `claudehop` are the same command.
+
+Or from a clone, if you'd rather have it symlinked into `~/.claude` with the
+shell glue written for you:
+
+```bash
 git clone https://github.com/psychofict/claudehop.git
 cd claudehop
 ./install.sh          # symlinks into ~/.claude, adds one line to your rc file
 ```
 
-Then open a new terminal. `hop` and `claudehop` are the same command.
-
 `./install.sh --copy` installs copies instead of symlinks, `--no-rc` skips the
 shell wiring, `--uninstall` reverses it. None of them ever touch
 `~/.claude/accounts/`, where the credentials live.
 
-It's also a normal Python package if you'd rather manage it that way — one
-module, no dependencies:
-
-```bash
-pipx install .                      # both commands land on your PATH
-eval "$(claudehop shell-init)"      # optional: the `hop` alias + tab-completion
-```
-
-Requires Python 3.9+ and Claude Code. Linux and macOS.
+Requires Python 3.9+ and Claude Code. Linux and macOS. One module, no
+dependencies.
 
 ## Adding an account
 
