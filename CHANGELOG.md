@@ -7,15 +7,19 @@ This project follows [semantic versioning](https://semver.org/).
 
 ### Added
 
-- **Installs as a Python package.** `pyproject.toml` builds a wheel and an sdist
-  from the one module, and puts both `claudehop` and `hop` on your PATH:
+- **On PyPI.** `claudehop` installs from the index and puts both `claudehop` and
+  `hop` on your PATH:
 
   ```bash
-  pipx install .
+  pipx install claudehop
   ```
 
   Still no dependencies, still one file you can read in a sitting. `install.sh`
   is unchanged and remains the way to get the shell glue with it.
+- **Tagged releases build and publish themselves.** `.github/workflows/release.yml`
+  checks the tag against `VERSION`, builds the wheel and the sdist, publishes to
+  PyPI with trusted publishing (no API token anywhere), and attaches both files
+  to the GitHub release.
 - **`claudehop shell-init`** prints the shell glue a packaged install needs —
   the `hop` alias and tab-completion, without the PATH line the repo installer
   writes. `eval "$(claudehop shell-init)"` in your rc file.
