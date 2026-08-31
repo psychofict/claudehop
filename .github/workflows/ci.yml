@@ -49,12 +49,22 @@ jobs:
           hop --version | grep -qx "claudehop $(python -c 'import claudehop;print(claudehop.VERSION)')"
           hop shell-init | bash -n -          # the glue it hands to pip users must parse
           CLAUDE_HOP_OFFLINE=1 CLAUDE_CONFIG_DIR="$RUNNER_TEMP/c" hop doctor --json | python -c 'import json,sys;json.load(sys.stdin)'
-      - name: the sdist carries the installer and the tests
+      - name: the sdist carries the installer, the extras and the tests
         run: |
           set -euo pipefail
-          tar tzf dist/*.tar.gz | grep -q 'install.sh'
-          tar tzf dist/*.tar.gz | grep -q 'test/test-switch.sh'
-          tar tzf dist/*.tar.gz | grep -q 'shell/claudehop.sh'
+          # List once into a variable and match without a pipe. `tar | grep -q`
+          # is a race: grep exits on the first hit, tar keeps writing, and under
+          # pipefail the resulting EPIPE fails the step - the more files the
+          # sdist carries, the likelier it is to lose.
+          files="$(tar tzf dist/*.tar.gz)"
+          for want in install.sh test/test-switch.sh shell/claudehop.sh \
+                      extras/statusline-snippet.sh extras/claudehop-watch.py \
+                      extras/claudehop-watch.timer; do
+            case "$files" in
+              *"$want"*) ;;
+              *) echo "the sdist is missing $want"; exit 1 ;;
+            esac
+          done
 
   lint:
     runs-on: ubuntu-latest
