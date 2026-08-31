@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily claudehop login check
+
+[Timer]
+OnCalendar=daily
+# The machine is not always on at the same hour, and a check that silently
+# never ran is worse than no check at all.
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

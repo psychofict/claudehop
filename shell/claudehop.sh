@@ -35,7 +35,7 @@ _claudehop_names() {
   done
 }
 
-_claudehop_verbs='list use save add whoami active sync rm rename doctor shell-init help version'
+_claudehop_verbs='list use save add whoami active sync renew rm rename doctor shell-init help version'
 
 # --- completion ---------------------------------------------------------------
 if [ -n "${ZSH_VERSION:-}" ]; then
@@ -53,7 +53,7 @@ _claudehop_complete() {
     COMPREPLY=($(compgen -W "$_claudehop_verbs $names" -- "$cur"))
   else
     case "$prev" in
-      use|switch|rm|remove|delete|rename|mv|save|add|new|login)
+      use|switch|rm|remove|delete|rename|mv|save|add|new|login|renew|refresh)
         COMPREPLY=($(compgen -W "$names" -- "$cur")) ;;
       *)
         COMPREPLY=($(compgen -W "--verify --long --yes --no-sync --json --fix --no-color" -- "$cur")) ;;
