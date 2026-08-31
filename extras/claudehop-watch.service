@@ -1,0 +1,16 @@
+# Install with:
+#   cp extras/claudehop-watch.{service,timer} ~/.config/systemd/user/
+#   cp extras/claudehop-watch.py ~/.claude/bin/claudehop-watch
+#   systemctl --user enable --now claudehop-watch.timer
+[Unit]
+Description=claudehop: renew the saved Claude logins, warn before one expires
+
+[Service]
+Type=oneshot
+ExecStart=%h/.claude/bin/claudehop-watch
+# A user service gets a minimal PATH, so point at the command rather than
+# hoping it is on it. Drop this line if claudehop came from pip or pipx.
+Environment=CLAUDEHOP=%h/.claude/bin/claudehop
+# A login is good for ~30 days, so a week of notice is enough to plan one
+# sitting and short enough that you have not forgotten by the time it lands.
+Environment=CLAUDEHOP_WARN_DAYS=7

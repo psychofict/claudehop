@@ -100,6 +100,7 @@ Already logged in by hand? `hop save work` names whatever is live right now.
 
 ```bash
 hop whoami           # who am I right now (asks the API)
+hop renew            # refresh the saved tokens; one name, or all of them
 hop --long           # add token expiry and save dates to the listing
 hop list --verify    # check every saved token against the API
 hop rm <name>        # delete a saved account (does not log you out)
@@ -172,13 +173,23 @@ get back to a session you'd otherwise have to re-authenticate.
 
 ## Every account needs a real login about once a month
 
-The refresh token is good for roughly 30 days from the `/login` that issued it,
+The refresh token is good for up to 30 days from the `/login` that issued it,
 and **using the account does not extend it.** Measured 2026-08-06 across four
 accounts: one had its access token reissued that morning and its refresh window
-still ended 30 days after its first login, not 30 days after the refresh. So this
-is a hard monthly expiry per account, and nothing on this side can lengthen it —
-it's set by the OAuth server. `claude setup-token` is not a way around it either;
-those tokens expire too, and carry inference scope only.
+still ended 30 days after its first login, not 30 days after the refresh.
+
+Confirmed again 2026-08-31 by refreshing a saved token by hand. The call does
+rotate the refresh token, so it is easy to assume the clock rotates with it, but
+the reply came back with `refresh_token_expires_in` landing on the same
+wall-clock minute the old token was already going to die on. Access tokens are a
+flat 8 hours. A fresh login can also hand back less than the full 30 days: one
+account re-logged-in that morning got 27.5.
+
+So this is a hard monthly expiry per account, nothing on this side can lengthen
+it, and `hop renew` is honest about that. Renewing keeps the saved copies usable
+and current, which is worth doing, but only `hop add <name>` resets the clock.
+`claude setup-token` is not a way around it either; those tokens expire too, and
+carry inference scope only.
 
 With several accounts the dates drift apart and you get a browser round-trip per
 account per month. Logging in early resets the whole 30 days, so the cheap move is
@@ -196,6 +207,17 @@ $ hop doctor
 
 You also get a per-account warning starting 14 days out, and `doctor --json`
 carries the same thing under `reloginPlan` if you want to hang a reminder off it.
+`extras/` has two ready-made ways to hang one: a statusline snippet that counts
+down the last week, and a systemd user timer that renews the saved tokens daily
+and raises a desktop notification before the earliest window closes.
+
+One thing worth knowing about how this is reported. A saved profile is a snapshot
+from the last hop or sync, but Claude Code rotates the live token behind it every
+few hours and a browser re-login replaces it outright. For whichever account is
+active, the credential store is therefore newer than its own saved copy, and that
+is what `list` and `doctor` judge it by. Reading the snapshot instead is how a
+perfectly good login gets reported as expired. `doctor` tells you when the saved
+copy has fallen behind, and `--fix` syncs it.
 
 ## Why not `claude setup-token`
 

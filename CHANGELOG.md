@@ -3,6 +3,46 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [1.5.0] — 2026-08-31
+
+### Fixed
+
+- **The active account is judged by the live login, not by its saved copy.**
+  A profile on disk is a snapshot from the last hop or sync. Claude Code rotates
+  the live token behind it every few hours, and a browser re-login replaces it
+  outright, so for whichever account is active the credential store is newer by
+  definition. `list` and `doctor` were reading the snapshot, which meant a
+  working login could be reported as `expired (auto-renews)` with a dead refresh
+  window while the account was in fact fine. Both now read the store for the
+  active account, and `doctor` reports a snapshot that has fallen behind as its
+  own warning, with `--fix` to sync it.
+
+### Added
+
+- **`hop renew [name]`** refreshes the saved tokens in place, all of them or one.
+  It rotates the refresh token against the same endpoint Claude Code uses and
+  writes the result back immediately, which matters because the old token dies
+  the moment the reply arrives. It skips the live login while other `claude`
+  sessions are running, since those are holding the token it would rotate away;
+  `--yes` overrides. It does not extend anything, and says so.
+- **Hopping to an account with an aged-out access token renews it first.**
+  Claude Code would have renewed it on the next start anyway, but only if
+  nothing rewrote the store in between, and until then `whoami` and the
+  statusline report a dead token for an account that is fine.
+- **`extras/claudehop-watch.py`** with a systemd user service and timer: renews
+  the saved tokens daily and raises a desktop notification before the earliest
+  refresh window closes. The statusline snippet in `extras/` now counts down the
+  last week to the next real login.
+
+### Changed
+
+- The note on expiry now carries a second measurement, taken 2026-08-31 by
+  refreshing a saved token by hand. Refreshing rotates the refresh token, which
+  makes it easy to assume the window rotates too, but the reply came back with
+  `refresh_token_expires_in` landing on the same wall-clock minute the old token
+  was already going to expire. Access tokens are a flat 8 hours, and a fresh
+  login can hand back less than 30 days: one account got 27.5.
+
 ## [1.4.0] — 2026-08-11
 
 ### Added

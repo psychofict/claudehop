@@ -13,6 +13,7 @@ keep the account they began with.
 Now and then:
 
   hop whoami           who is logged in right now (asks the API)
+  hop renew [name]     refresh the saved tokens (all of them, or just one)
   hop save <name>      save a login you did by hand, under a name
   hop list --long      token expiry and when each account was saved
   hop rm <name>        delete a saved account (does not log you out)
@@ -42,6 +43,12 @@ else in the store, including your MCP server logins, is left alone. Email and
 plan are re-fetched from the API by Claude Code at startup, so swapping the
 credential is the entire job.
 
+About expiry: an access token lasts 8 hours and renews itself. The login behind
+it lasts up to about 30 days, and that date is fixed when you log in - renewing
+rotates the token but never moves the date, so `hop add <name>` is the only way
+to reset it. Log every account back in on the same day and the dates collapse
+into one, instead of one surprise logout per account per month.
+
 Environment: CLAUDE_CONFIG_DIR (default ~/.claude), CLAUDE_ACCOUNTS_DIR
 (default <config>/accounts), CLAUDE_HOP_BACKEND (auto|file|keychain),
 CLAUDE_HOP_OFFLINE=1 to never call the API.
@@ -61,7 +68,7 @@ import sys
 import textwrap
 import time
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 PROG = "claudehop"
 
 
@@ -85,6 +92,11 @@ ACCOUNTS = env("CLAUDE_ACCOUNTS_DIR") or os.path.join(CLAUDE_DIR, "accounts")
 ACTIVE_PTR = os.path.join(ACCOUNTS, "active")
 LOCK_PATH = os.path.join(ACCOUNTS, ".lock")
 PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+
+# Claude Code's own public OAuth client - the same id it puts in the authorize
+# URL it opens in your browser. Refreshing a saved token needs it.
+CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 # What Claude Code calls its keychain item on macOS.
 KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -516,6 +528,69 @@ def identify_many(blocks: dict[str, dict]) -> dict[str, dict]:
     return {n: identity(b) for n, b in blocks.items()}
 
 
+def refresh_block(block: dict, timeout: float = API_TIMEOUT) -> tuple[dict | None, dict, str]:
+    """Trade a refresh token for a fresh credential block. (block, identity, error).
+
+    The refresh token is single use. A successful call rotates it and the old
+    one stops working the moment the response is written, so whatever comes back
+    MUST be persisted or the account is locked out - which is exactly how a
+    hand-run refresh can destroy a login that had days left on it.
+    """
+    import urllib.error
+    import urllib.request
+
+    rt = block.get("refreshToken")
+    if not rt:
+        return None, {}, "no refresh token saved"
+    body = json.dumps(
+        {"grant_type": "refresh_token", "refresh_token": rt, "client_id": CLIENT_ID}
+    ).encode()
+    req = urllib.request.Request(
+        TOKEN_URL,
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": f"{PROG}/{VERSION}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            payload = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode()).get("error_description") or ""
+        except Exception:
+            detail = ""
+        if e.code in (400, 401):
+            return None, {}, detail or "the refresh token was rejected; log in again"
+        return None, {}, f"http {e.code}{': ' + detail if detail else ''}"
+    except Exception as e:
+        return None, {}, str(e)
+
+    if not payload.get("access_token") or not payload.get("refresh_token"):
+        return None, {}, "the token endpoint returned no credential"
+    now = time.time()
+    fresh = dict(block)
+    fresh["accessToken"] = payload["access_token"]
+    fresh["refreshToken"] = payload["refresh_token"]
+    fresh["expiresAt"] = int((now + payload.get("expires_in", 0)) * 1000)
+    if payload.get("refresh_token_expires_in"):
+        fresh["refreshTokenExpiresAt"] = int(
+            (now + payload["refresh_token_expires_in"]) * 1000
+        )
+    if payload.get("scope"):
+        fresh["scopes"] = payload["scope"].split()
+    acct = payload.get("account") or {}
+    ident = {
+        "email": acct.get("email_address"),
+        "accountUuid": acct.get("uuid"),
+        "org": (payload.get("organization") or {}).get("name"),
+    }
+    return fresh, {k: v for k, v in ident.items() if v}, ""
+
+
+def expired(block: dict) -> bool:
+    exp = block.get("expiresAt")
+    return bool(exp) and exp / 1000 <= time.time()
+
+
 def humanise(seconds: float) -> str:
     if seconds < 3600:
         return f"{int(seconds // 60)}m"
@@ -560,12 +635,15 @@ def token_state(block: dict, ident: dict) -> str:
 
 
 
-# A refresh token is good for about 30 days from the login that issued it, and
-# using the account does NOT extend it - measured 2026-08-06 across four accounts,
-# one of which had its access token reissued that morning and still expired 30 days
-# after its first login. So every account needs a real /login roughly monthly, and
-# with several accounts the dates only drift further apart. Two weeks of notice is
-# enough to plan one sitting; one week is not.
+# A login is good for up to about 30 days and nothing a client does moves that
+# date. Measured again 2026-08-31 by refreshing a saved token by hand: the call
+# rotates the refresh token, and the new one came back with
+# refresh_token_expires_in = 395028s, landing on the same wall-clock minute the
+# old one was already going to die. Access tokens are a flat 8h. So renewing
+# keeps a profile usable day to day and buys the account nothing; only a real
+# login resets the clock, and it can hand back less than 30 days - one account
+# re-logged-in that morning got 27.5. Two weeks of notice is enough to plan one
+# sitting; one week is not.
 RELOGIN_NOTICE = 14 * 86400
 
 
@@ -580,7 +658,24 @@ def refresh_warning(block: dict) -> str | None:
     return None
 
 
-def relogin_plan(profiles: dict[str, dict]) -> dict | None:
+def effective_blocks(
+    profiles: dict[str, dict], cur: str | None, live: dict | None
+) -> dict[str, dict]:
+    """The credential that actually applies to each account right now.
+
+    A saved profile is a snapshot from the last hop or sync. For whichever
+    account is live the credential store is newer by definition - Claude Code
+    rotates the token every few hours and a browser re-login replaces it
+    outright - so judging the active account by its snapshot is how this tool
+    ends up calling a perfectly good login expired.
+    """
+    blocks = {n: p.get(OAUTH_KEY, {}) or {} for n, p in profiles.items()}
+    if cur and live and cur in blocks:
+        blocks[cur] = live
+    return blocks
+
+
+def relogin_plan(blocks: dict[str, dict]) -> dict | None:
     """When each account needs a real /login again, and the cheapest day to do it.
 
     Logging in early resets the whole 30-day window, so doing every account on the
@@ -588,9 +683,9 @@ def relogin_plan(profiles: dict[str, dict]) -> dict | None:
     a month instead of one surprise per account.
     """
     due = {
-        n: p.get(OAUTH_KEY, {}).get("refreshTokenExpiresAt", 0) / 1000
-        for n, p in profiles.items()
-        if p.get(OAUTH_KEY, {}).get("refreshTokenExpiresAt")
+        n: b["refreshTokenExpiresAt"] / 1000
+        for n, b in blocks.items()
+        if b.get("refreshTokenExpiresAt")
     }
     if not due:
         return None
@@ -798,9 +893,10 @@ def cmd_list(verify=False, as_json=False, long_=False, **_):
         return
 
     profiles = {n: load_profile(n) for n in names}
+    blocks = effective_blocks(profiles, cur, live)
     idents: dict[str, dict] = {}
     if verify:
-        idents = identify_many({n: p.get(OAUTH_KEY, {}) for n, p in profiles.items()})
+        idents = identify_many(blocks)
         for n, ident in idents.items():
             if not ident.get("email"):
                 continue
@@ -824,13 +920,9 @@ def cmd_list(verify=False, as_json=False, long_=False, **_):
                             "accountUuid": profiles[n].get("accountUuid"),
                             "savedAt": profiles[n].get("savedAt"),
                             "active": n == cur,
-                            "expiresAt": profiles[n].get(OAUTH_KEY, {}).get("expiresAt"),
-                            "refreshTokenExpiresAt": profiles[n]
-                            .get(OAUTH_KEY, {})
-                            .get("refreshTokenExpiresAt"),
-                            "tokenState": token_state(
-                                profiles[n].get(OAUTH_KEY, {}), idents[n]
-                            )
+                            "expiresAt": blocks[n].get("expiresAt"),
+                            "refreshTokenExpiresAt": blocks[n].get("refreshTokenExpiresAt"),
+                            "tokenState": token_state(blocks[n], idents[n])
                             if verify
                             else None,
                         }
@@ -853,7 +945,7 @@ def cmd_list(verify=False, as_json=False, long_=False, **_):
         hdr += ("TOKEN", "SAVED")
     rows = []
     for n in names:
-        blk = profiles[n].get(OAUTH_KEY, {})
+        blk = blocks[n]
         row = (
             "*" if n == cur else " ",
             n,
@@ -868,7 +960,7 @@ def cmd_list(verify=False, as_json=False, long_=False, **_):
     print_table(hdr, rows, {i for i, n in enumerate(names) if n == cur})
 
     for n in names:
-        warn = refresh_warning(profiles[n].get(OAUTH_KEY, {}))
+        warn = refresh_warning(blocks[n])
         if warn:
             info(f"{YELLOW}note:{OFF} {n}: {warn}")
     if cur is None and live:
@@ -1002,6 +1094,77 @@ def cmd_sync(**_):
     print(f"synced live login into {n}")
 
 
+def cmd_renew(name=None, yes=False, **_):
+    """Refresh saved logins in place. No name means all of them.
+
+    This buys time on the access token, not on the account: the refresh window
+    is a fixed date set when you logged in, and rotating the token does not move
+    it. What it is for is keeping the saved copies usable and honest - a profile
+    you have not hopped to in a fortnight still holds the token from that day,
+    and renewing it here is how you find out it died before you need it.
+    """
+    if OFFLINE:
+        die(f"{PROG} is in offline mode ($CLAUDE_HOP_OFFLINE); renewing needs the network.")
+    names = list_profiles()
+    if not names:
+        die("no saved accounts to renew.")
+    if name:
+        load_profile(name)  # dies with the usual message if it is not a real one
+        names = [name]
+
+    cur = active_name()
+    live = live_oauth()
+    failed = 0
+    for n in names:
+        blk = live if (n == cur and live) else load_profile(n).get(OAUTH_KEY, {})
+        # Renewing rotates the refresh token, and the old one dies with the call.
+        # A session that is already running holds the old one, so rotating the
+        # live login out from under it is the one way this command can cost you
+        # something. Inactive profiles have nobody holding them - do those.
+        if n == cur and not yes:
+            pids = running_claude_pids()
+            if pids:
+                print(
+                    f"  {DIM}{n}{OFF}  skipped - the live login, with "
+                    f"{len(pids)} session(s) running (--yes overrides)"
+                )
+                continue
+        left = refresh_left(blk)
+        if not blk.get("refreshToken"):
+            print(f"  {RED}{n}{OFF}  no saved credential - `{PROG} add {n}`")
+            failed += 1
+            continue
+        if left is not None and left <= 0:
+            print(f"  {RED}{n}{OFF}  refresh window closed - `{PROG} add {n}` to log in again")
+            failed += 1
+            continue
+
+        fresh, ident, err = refresh_block(blk)
+        if not fresh:
+            print(f"  {RED}{n}{OFF}  {err}")
+            failed += 1
+            continue
+        # Persist before anything else can run: the old refresh token is dead
+        # from the moment that call returned.
+        save_profile(n, fresh, ident)
+        if n == cur:
+            set_live_oauth(fresh)
+        note = refresh_warning(fresh)
+        tail = f"  {YELLOW}{note}{OFF}" if note else ""
+        print(f"  {GREEN}{n}{OFF}  access {expiry_note(fresh)}{tail}")
+
+    plan = relogin_plan({n: load_profile(n).get(OAUTH_KEY, {}) for n in list_profiles()})
+    lines = relogin_lines(plan) if plan else []
+    if lines:
+        sys.stdout.flush()  # the results above go to stdout, these to stderr
+        for i, line in enumerate(lines):
+            info(f"{DIM}{'re-login' if i == 0 else '        '}  {line}{OFF}")
+    if cur in names and yes:
+        warn_running()
+    if failed:
+        sys.exit(1)
+
+
 def cmd_use(name=None, yes=False, no_sync=False, **_):
     if not name:
         die(f"usage: {PROG} use <name>", USAGE_EXIT)
@@ -1015,6 +1178,19 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
         print(f"already on {GREEN}{name}{OFF} ({target.get('email') or '?'})")
         set_active_ptr(name)
         return
+
+    # Hand over a credential that is usable as it lands. Claude Code would renew
+    # an aged-out access token itself on the next start, but only if nothing
+    # rewrites the store first - and until it does, `whoami` and the statusline
+    # report a dead token for an account that is fine.
+    rleft = refresh_left(blk)
+    if not OFFLINE and expired(blk) and (rleft is None or rleft > 0):
+        fresh, ident, err = refresh_block(blk)
+        if fresh:
+            save_profile(name, fresh, ident)
+            target, blk = load_profile(name), fresh
+        else:
+            info(f"{DIM}could not renew '{name}' first ({err}); using the saved token{OFF}")
 
     if live and not no_sync:
         sync_live_before_switch(live)
@@ -1212,7 +1388,8 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
     live = live_oauth()
     names = list_profiles()
     profiles = {n: read_json(profile_path(n)) for n in names}
-    plan = relogin_plan(profiles)
+    blocks = effective_blocks(profiles, active_name(), live)
+    plan = relogin_plan(blocks)
 
     for var in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
         if os.environ.get(var):
@@ -1238,9 +1415,22 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
                 note("error", f"{p} is mode {mode:o}; it should be 600")
         if not profiles[n].get(OAUTH_KEY, {}).get("accessToken"):
             note("error", f"'{n}' has no saved credentials; re-add it")
-        warn = refresh_warning(profiles[n].get(OAUTH_KEY, {}))
+        warn = refresh_warning(blocks[n])
         if warn:
             note("warn", f"{n}: {warn}")
+        # The live account's snapshot drifts every time Claude Code rotates the
+        # token. Harmless until you hop away and back, which restores the old
+        # one - so say it while it is still cheap to fix.
+        saved = profiles[n].get(OAUTH_KEY, {})
+        if blocks[n] is not saved and saved.get("accessToken") != blocks[n].get("accessToken"):
+            if fix:
+                save_profile(n, blocks[n], {})
+                note("warn", f"'{n}' saved copy was behind the live login", "synced")
+            else:
+                note(
+                    "warn",
+                    f"'{n}' saved copy is behind the live login; `{PROG} sync` (or --fix)",
+                )
 
     stale = []
     if os.path.isdir(ACCOUNTS):
@@ -1269,7 +1459,6 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
         note("warn", f"{len(pids)} claude session(s) running; they may rewrite the credentials")
 
     if verify and names:
-        blocks = {n: load_profile(n).get(OAUTH_KEY, {}) for n in names}
         for n, ident in identify_many(blocks).items():
             state = token_state(blocks[n], ident)
             if state in ("ok", "not checked", "stale (renews)", None):
@@ -1321,7 +1510,8 @@ def cmd_version(**_):
 
 
 # Second names for a command, kept working but not worth offering on TAB.
-ALIASES = {"ls", "current", "switch", "new", "login", "remove", "delete", "mv", "check"}
+ALIASES = {"ls", "current", "switch", "new", "login", "remove", "delete", "mv", "check",
+           "refresh"}
 
 
 # Verbs and flags worth completing. Built from the tables below at call time, so
@@ -1365,7 +1555,7 @@ def cmd_shell_init(**_):
                 COMPREPLY=($(compgen -W "{verbs} $names" -- "$cur"))
               else
                 case "$prev" in
-                  use|switch|rm|remove|delete|rename|mv|save|add|new|login)
+                  use|switch|rm|remove|delete|rename|mv|save|add|new|login|renew|refresh)
                     COMPREPLY=($(compgen -W "$names" -- "$cur")) ;;
                   *)
                     COMPREPLY=($(compgen -W "{flags}" -- "$cur")) ;;
@@ -1386,6 +1576,7 @@ COMMANDS = {
     "whoami": cmd_whoami, "current": cmd_whoami,
     "active": cmd_active,
     "sync": cmd_sync,
+    "renew": cmd_renew, "refresh": cmd_renew,
     "rm": cmd_rm, "remove": cmd_rm, "delete": cmd_rm,
     "rename": cmd_rename, "mv": cmd_rename,
     "doctor": cmd_doctor, "check": cmd_doctor,

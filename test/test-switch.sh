@@ -53,6 +53,29 @@ PY
   echo alpha > "$CLAUDE_ACCOUNTS_DIR/active"
 }
 
+# Edit one field of a saved account's oauth block. For whichever account is
+# active, the credential store is what the tool believes - Claude Code rewrites
+# it every few hours - so a fixture that only touches the saved copy is not a
+# state this tool can ever be in. Mirror it into the store as well.
+poke() {  # poke <name> <field> <python expression>
+  CH_N="$1" CH_F="$2" CH_V="$3" python3 - <<'PY'
+import json, os, time  # noqa: F401  (time is for the caller's expression)
+n, f = os.environ['CH_N'], os.environ['CH_F']
+v = eval(os.environ['CH_V'])
+d = os.environ['CLAUDE_ACCOUNTS_DIR']
+prof = f"{d}/{n}.json"
+p = json.load(open(prof))
+p['claudeAiOauth'][f] = v
+json.dump(p, open(prof, "w"))
+if os.path.exists(f"{d}/active") and open(f"{d}/active").read().strip() == n:
+    c = os.environ['CLAUDE_CONFIG_DIR'] + "/.credentials.json"
+    doc = json.load(open(c))
+    if doc.get('claudeAiOauth'):
+        doc['claudeAiOauth'][f] = v
+        json.dump(doc, open(c, "w"))
+PY
+}
+
 echo "claudehop test suite"
 
 # --- 1. a plain switch --------------------------------------------------------
@@ -106,10 +129,7 @@ is "active prints just the name"     "$("$HOP" active 2>/dev/null)" "beta"
 # Colour codes inside a cell used to be counted as width, so an expired token
 # knocked every later column out of line. The coloured cell lives in --long.
 seed                                    # two rows, both with the same savedAt
-python3 -c "
-import json,os
-d=os.environ['CLAUDE_ACCOUNTS_DIR']+'/alpha.json'; p=json.load(open(d))
-p['claudeAiOauth']['expiresAt']=1000; json.dump(p,open(d,'w'))"
+poke alpha expiresAt 1000
 strip_ansi() { python3 -c 'import re,sys;sys.stdout.write(re.sub("\033\\[[0-9;]*m","",sys.stdin.read()))'; }
 saved_cols() {  # column where the SAVED cell starts, one number per data row
   # NO_COLOR is exported for the whole suite and _use_color() checks it before
@@ -488,15 +508,8 @@ is "bare hop in a pipe switches nothing" "$(live_token)" "tok-A"
 # so with several accounts the dates drift apart. doctor should name the earliest
 # and say to do them all that day, which resets every window to the same date.
 seed
-python3 - <<'PY'
-import json, os, time
-d = os.environ['CLAUDE_ACCOUNTS_DIR']
-now = time.time()
-for n, days in (('alpha', 3), ('beta', 20)):          # 3d away, and 20d away
-    p = json.load(open(f"{d}/{n}.json"))
-    p['claudeAiOauth']['refreshTokenExpiresAt'] = int((now + days * 86400) * 1000)
-    json.dump(p, open(f"{d}/{n}.json", "w"))
-PY
+poke alpha refreshTokenExpiresAt "int((time.time() + 3 * 86400) * 1000)"
+poke beta  refreshTokenExpiresAt "int((time.time() + 20 * 86400) * 1000)"
 out="$("$HOP" doctor 2>/dev/null)"
 case "$out" in *"re-login     by"*) ok "doctor prints a re-login date" ;;
               *) bad "doctor prints a re-login date" "$out" ;; esac
@@ -517,31 +530,61 @@ is "the plan is in --json" \
 
 # One account, or dates within a day of each other, means nothing to batch.
 seed
-python3 - <<'PY'
-import json, os, time
-d = os.environ['CLAUDE_ACCOUNTS_DIR']
-now = time.time()
-for n in ('alpha', 'beta'):
-    p = json.load(open(f"{d}/{n}.json"))
-    p['claudeAiOauth']['refreshTokenExpiresAt'] = int((now + 20 * 86400) * 1000)
-    json.dump(p, open(f"{d}/{n}.json", "w"))
-PY
+poke alpha refreshTokenExpiresAt "int((time.time() + 20 * 86400) * 1000)"
+poke beta  refreshTokenExpiresAt "int((time.time() + 20 * 86400) * 1000)"
 out="$("$HOP" doctor 2>/dev/null)"
 case "$out" in *"collapse"*) bad "no batching advice when the dates already match" "$out" ;;
               *) ok "no batching advice when the dates already match" ;; esac
 
 # An already-dead refresh token needs a real login, not a batching suggestion.
 seed
+poke alpha refreshTokenExpiresAt "int((time.time() - 86400) * 1000)"
+out="$("$HOP" doctor 2>/dev/null)"
+case "$out" in *"expired: alpha"*) ok "doctor calls out a dead refresh token" ;;
+              *) bad "doctor calls out a dead refresh token" "$out" ;; esac
+
+# --- 12f. the active account is judged by the live login ----------------------
+# A saved profile is a snapshot from the last hop or sync. Claude Code rotates
+# the live token behind it and a browser re-login replaces it outright, so for
+# the active account the credential store is newer by definition. Reading the
+# snapshot instead is how a working login gets reported as expired.
+seed
 python3 - <<'PY'
 import json, os, time
 d = os.environ['CLAUDE_ACCOUNTS_DIR']
 p = json.load(open(f"{d}/alpha.json"))
+p['claudeAiOauth']['accessToken'] = 'tok-A-old'
+p['claudeAiOauth']['expiresAt'] = 1000
 p['claudeAiOauth']['refreshTokenExpiresAt'] = int((time.time() - 86400) * 1000)
 json.dump(p, open(f"{d}/alpha.json", "w"))
 PY
+out="$(env -u NO_COLOR CLICOLOR_FORCE=1 "$HOP" list --long 2>/dev/null | strip_ansi)"
+case "$out" in *expired*) bad "the live login beats a stale snapshot" "$out" ;;
+              *) ok "the live login beats a stale snapshot" ;; esac
 out="$("$HOP" doctor 2>/dev/null)"
-case "$out" in *"expired: alpha"*) ok "doctor calls out a dead refresh token" ;;
-              *) bad "doctor calls out a dead refresh token" "$out" ;; esac
+case "$out" in *"alpha: refresh token expired"*)
+                bad "a live account is not called dead" "$out" ;;
+              *) ok "a live account is not called dead" ;; esac
+case "$out" in *"'alpha' saved copy is behind"*) ok "doctor spots the stale snapshot" ;;
+              *) bad "doctor spots the stale snapshot" "$out" ;; esac
+case "$out" in *"'beta' saved copy is behind"*)
+                bad "only the active account is compared to the store" "$out" ;;
+              *) ok "only the active account is compared to the store" ;; esac
+"$HOP" doctor --fix >/dev/null 2>&1
+is "doctor --fix syncs the stale snapshot" \
+   "$(jget "$CLAUDE_ACCOUNTS_DIR/alpha.json" 'claudeAiOauth.accessToken')" "tok-A"
+
+# --- 12g. renew ---------------------------------------------------------------
+# The suite runs with CLAUDE_HOP_OFFLINE=1, so renew has to refuse rather than
+# reach for the network - and refuse without touching anything.
+seed
+out="$("$HOP" renew 2>&1)"; rc=$?
+is "renew exits non-zero when offline"      "$rc" "1"
+case "$out" in *offline*) ok "renew says why it refused" ;;
+              *) bad "renew says why it refused" "$out" ;; esac
+is "renew leaves the credential store alone" "$(live_token)" "tok-A"
+is "renew leaves the saved copy alone" \
+   "$(jget "$CLAUDE_ACCOUNTS_DIR/alpha.json" 'claudeAiOauth.accessToken')" "tok-A"
 
 # --- 13. unit checks on the tricky helpers ------------------------------------
 unit() {  # unit <name> <python expression> <expected>
