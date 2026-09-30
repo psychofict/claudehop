@@ -96,6 +96,30 @@ even if the terminal dies on the way out.
 
 Already logged in by hand? `hop save work` names whatever is live right now.
 
+## Providers: Bedrock, Vertex, a gateway
+
+Some ways of running Claude Code are not a login at all: Amazon Bedrock and
+Vertex read environment variables, and a gateway is a base URL. Write a small
+launcher script that sets them and runs `claude "$@"`, register it once, and
+hop to it like an account:
+
+```bash
+hop provider bedrock claude-bedrock   # name, then the command to run instead of `claude`
+hop bedrock                           # new `claude` commands go through the launcher
+hop off                               # back to your saved login
+```
+
+Hopping to an account (`hop work`) also switches a provider off. Saved logins
+are never touched, so a provider works even when a login has expired. `hop`
+lists providers under your accounts, `hop active` prints the provider's name
+while one is on (`hop active --json` keeps the account too), and `hop doctor`
+reports a launcher that has gone missing.
+
+The switch is read by a `claude` function in the shell glue, so it applies to
+terminals that have loaded it (`source ~/.claude/claudehop.sh`, or open a new
+one). Sessions that are already running keep what they started with. The
+command must be a single word; put arguments in the launcher.
+
 ## Everything else
 
 ```bash

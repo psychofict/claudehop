@@ -3,6 +3,20 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Providers.** `hop provider <name> <command>` registers a way of running Claude
+  Code that is not a saved login (Amazon Bedrock, Vertex, a gateway), and
+  `hop <name>` switches new sessions to it. `hop off`, or hopping to any account,
+  switches back. A provider never touches the saved logins. The `claude`
+  function in the shell glue (and in `hop shell-init`) reads the switch, so only
+  new commands in shells that have loaded it are affected. `list`, the picker,
+  `active`, `rm` and `doctor` all know about providers, and `--json` output gains
+  `provider` and `providers` keys. While a provider is on, `hop active` prints its
+  name instead of the account name.
+
 ## [1.5.0] — 2026-08-31
 
 ### Fixed
