@@ -33,9 +33,14 @@ _claudehop_names() {
     n="${f##*/}"
     printf '%s ' "${n%.json}"
   done
+  for f in "$d"/*.provider; do
+    [ -e "$f" ] || continue
+    n="${f##*/}"
+    printf '%s ' "${n%.provider}"
+  done
 }
 
-_claudehop_verbs='list use save add whoami active sync renew rm rename doctor shell-init help version'
+_claudehop_verbs='list use save add whoami active sync renew rm rename provider off doctor shell-init help version'
 
 # --- completion ---------------------------------------------------------------
 if [ -n "${ZSH_VERSION:-}" ]; then
@@ -61,6 +66,26 @@ _claudehop_complete() {
   fi
 }
 complete -F _claudehop_complete claudehop hop claude-acct cacct 2>/dev/null
+
+# --- providers ---------------------------------------------------------------
+# `hop bedrock` (any name you registered with `hop provider <name> <command>`)
+# makes new sessions run through that command instead of a saved login;
+# `hop off`, or hopping to an account, goes back. This function is what reads
+# the switch, so only NEW `claude` commands change, and only in shells that have
+# this file loaded.
+claude() {
+  local _d="${CLAUDE_ACCOUNTS_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/accounts}" _p _c
+  _p="$(cat "$_d/provider" 2>/dev/null)"
+  if [ -n "$_p" ]; then
+    _c="$(head -n 1 "$_d/$_p.provider" 2>/dev/null)"
+    if [ -n "$_c" ] && command -v "$_c" >/dev/null 2>&1; then
+      command "$_c" "$@"
+      return
+    fi
+    echo "hop: provider '$_p' is on but '$_c' was not found; starting claude normally" >&2
+  fi
+  command claude "$@"
+}
 
 # --- back-compat -------------------------------------------------------------
 # The tool was called claude-acct until 1.2.0, and the scheme before that

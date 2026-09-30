@@ -10,6 +10,17 @@ To switch accounts, run `hop` and pick one. That is the whole tool.
 A hop takes effect for the next `claude` you start. Sessions already running
 keep the account they began with.
 
+Not everything is a login. Amazon Bedrock, Vertex or a gateway run Claude Code
+from environment variables, so a provider is a command you register once and
+then hop to like an account:
+
+  hop provider bedrock claude-bedrock   register: the command runs instead of `claude`
+  hop bedrock          new `claude` commands run through it
+  hop off              back to the saved login (hopping to an account does too)
+
+A provider leaves every saved login alone. The `claude` function in the shell
+glue reads the switch, so it only applies in shells that have the glue loaded.
+
 Now and then:
 
   hop whoami           who is logged in right now (asks the API)
@@ -416,6 +427,76 @@ def set_active_ptr(name: str):
     with os.fdopen(fd, "w") as f:
         f.write(name + "\n")
     os.replace(tmp, ACTIVE_PTR)
+
+
+# --------------------------------------------------------------- providers
+#
+# A provider is a way of running Claude Code that does not use a saved login at
+# all - Amazon Bedrock, Vertex, a gateway. It is one file, <name>.provider, that
+# holds the name of a command to run in place of `claude`. Turning one on writes
+# its name to the `provider` pointer and leaves every saved login alone; hopping
+# to an account (or `hop off`) removes the pointer. The `claude` function in the
+# shell glue reads the pointer, so only NEW `claude` commands change.
+
+PROVIDER_PTR = os.path.join(ACCOUNTS, "provider")
+PROVIDER_EXT = ".provider"
+
+
+def provider_path(name: str) -> str:
+    return os.path.join(ACCOUNTS, name + PROVIDER_EXT)
+
+
+def list_providers() -> list[str]:
+    try:
+        files = os.listdir(ACCOUNTS)
+    except OSError:
+        return []
+    return sorted(f[: -len(PROVIDER_EXT)] for f in files if f.endswith(PROVIDER_EXT))
+
+
+def provider_command(name: str) -> str | None:
+    try:
+        with open(provider_path(name)) as f:
+            cmd = f.readline().strip()
+    except OSError:
+        return None
+    return cmd or None
+
+
+def read_provider() -> str | None:
+    try:
+        with open(PROVIDER_PTR) as f:
+            ptr = f.read().strip()
+    except OSError:
+        return None
+    return ptr or None
+
+
+def set_provider_ptr(name: str):
+    profiles_dir()
+    tmp = f"{PROVIDER_PTR}.tmp-{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(name + "\n")
+    os.replace(tmp, PROVIDER_PTR)
+
+
+def clear_provider_ptr() -> str | None:
+    """Turn any provider off. Returns the name that was on, if any."""
+    was = read_provider()
+    try:
+        os.remove(PROVIDER_PTR)
+    except OSError:
+        pass
+    return was
+
+
+def active_provider() -> str | None:
+    """The provider new sessions will use, or None. A pointer that names a
+    provider which no longer exists counts as off, so a deleted file can never
+    leave `claude` running a command that is not there."""
+    ptr = read_provider()
+    return ptr if ptr and provider_command(ptr) else None
 
 
 def active_name(check_api: bool = False) -> str | None:
@@ -882,9 +963,11 @@ def print_table(hdr: tuple, rows: list, highlight=()):
 
 def cmd_list(verify=False, as_json=False, long_=False, **_):
     names = list_profiles()
+    provs = list_providers()
+    prov = active_provider()
     live = live_oauth()
     cur = active_name(check_api=verify)
-    if not names and not as_json:
+    if not names and not provs and not as_json:
         info("No accounts saved yet.")
         if live:
             info(f"You are logged in - save this one with:  {PROG} save <name>")
@@ -912,6 +995,11 @@ def cmd_list(verify=False, as_json=False, long_=False, **_):
                 {
                     "backend": STORE.name,
                     "active": cur,
+                    "provider": prov,
+                    "providers": [
+                        {"name": p, "command": provider_command(p), "active": p == prov}
+                        for p in provs
+                    ],
                     "accounts": [
                         {
                             "name": n,
@@ -947,7 +1035,7 @@ def cmd_list(verify=False, as_json=False, long_=False, **_):
     for n in names:
         blk = blocks[n]
         row = (
-            "*" if n == cur else " ",
+            "*" if n == cur and not prov else " ",
             n,
             profiles[n].get("email") or "?",
             profiles[n].get("plan") or "?",
@@ -957,7 +1045,17 @@ def cmd_list(verify=False, as_json=False, long_=False, **_):
         if long_:
             row += (expiry_note(blk), (profiles[n].get("savedAt") or "")[:10])
         rows.append(row)
-    print_table(hdr, rows, {i for i, n in enumerate(names) if n == cur})
+    for p in provs:
+        cmd = provider_command(p) or "?"
+        row = ("*" if p == prov else " ", p, f"runs {cmd}", "provider")
+        if verify:
+            row += ("ok" if shutil.which(cmd) else "command not found",)
+        if long_:
+            row += ("", "")
+        rows.append(row)
+    lit = {i for i, n in enumerate(names) if n == cur and not prov}
+    lit |= {len(names) + i for i, p in enumerate(provs) if p == prov}
+    print_table(hdr, rows, lit)
 
     for n in names:
         warn = refresh_warning(blocks[n])
@@ -979,36 +1077,51 @@ def cmd_pick(yes=False, no_sync=False, verify=False, as_json=False, long_=False,
     pipe and there is nobody there to answer.
     """
     names = list_profiles()
-    if len(names) < 2 or not (sys.stdin.isatty() and sys.stdout.isatty()):
+    provs = list_providers()
+    choices = names + provs
+    if len(choices) < 2 or not (sys.stdin.isatty() and sys.stdout.isatty()):
         cmd_list(verify=verify, as_json=as_json, long_=long_)
         return
 
     profiles = {n: load_profile(n) for n in names}
     cur = active_name()
+    prov = active_provider()
     rows = [
-        (f"{i}. *" if n == cur else f"{i}.", n,
+        (f"{i}. *" if n == cur and not prov else f"{i}.", n,
          profiles[n].get("email") or "?", profiles[n].get("plan") or "?")
         for i, n in enumerate(names, 1)
     ]
-    print_table(("", "NAME", "EMAIL", "PLAN"), rows,
-                {i for i, n in enumerate(names) if n == cur})
+    rows += [
+        (f"{len(names) + j}. *" if p == prov else f"{len(names) + j}.", p,
+         f"runs {provider_command(p) or '?'}", "provider")
+        for j, p in enumerate(provs, 1)
+    ]
+    lit = {i for i, n in enumerate(names) if n == cur and not prov}
+    lit |= {len(names) + j for j, p in enumerate(provs) if p == prov}
+    print_table(("", "NAME", "EMAIL", "PLAN"), rows, lit)
     try:
-        answer = input(f"\nhop to which? [1-{len(names)}, Enter to stay] ").strip()
+        answer = input(f"\nhop to which? [1-{len(choices)}, Enter to stay] ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return
     if not answer:
         return
 
-    if answer.isdigit() and 1 <= int(answer) <= len(names):
-        chosen = names[int(answer) - 1]
+    if answer.isdigit() and 1 <= int(answer) <= len(choices):
+        chosen = choices[int(answer) - 1]
     else:  # a name, or enough of one to be unambiguous
-        hits = [n for n in names if n == answer] or [n for n in names if n.startswith(answer)]
+        hits = [n for n in choices if n == answer] or [n for n in choices if n.startswith(answer)]
         if len(hits) != 1:
             die(f"'{answer}' is not one of them. Pick a number, or a name.", USAGE_EXIT)
         chosen = hits[0]
 
-    if chosen == cur:
+    if chosen in provs:
+        if chosen == prov:
+            print(f"already on {GREEN}{chosen}{OFF}")
+        else:
+            cmd_provider_on(chosen)
+        return
+    if chosen == cur and not prov:
         print(f"already on {GREEN}{chosen}{OFF}")
         return
     cmd_use(name=chosen, yes=yes, no_sync=no_sync)
@@ -1016,8 +1129,11 @@ def cmd_pick(yes=False, no_sync=False, verify=False, as_json=False, long_=False,
 
 def cmd_active(as_json=False, **_):
     cur = active_name()
+    prov = active_provider()
     if as_json:
-        print(json.dumps({"active": cur, "backend": STORE.name}))
+        print(json.dumps({"active": cur, "provider": prov, "backend": STORE.name}))
+    elif prov:
+        print(prov)  # what a new `claude` will run as; --json keeps the account too
     elif cur:
         print(cur)
     else:
@@ -1168,6 +1284,8 @@ def cmd_renew(name=None, yes=False, **_):
 def cmd_use(name=None, yes=False, no_sync=False, **_):
     if not name:
         die(f"usage: {PROG} use <name>", USAGE_EXIT)
+    if name in list_providers() and not os.path.exists(profile_path(name)):
+        return cmd_provider_on(name=name)
     target = load_profile(name)
     blk = target.get(OAUTH_KEY)
     if not blk:
@@ -1175,8 +1293,12 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
 
     live = live_oauth()
     if live and live.get("accessToken") == blk.get("accessToken"):
-        print(f"already on {GREEN}{name}{OFF} ({target.get('email') or '?'})")
         set_active_ptr(name)
+        left = clear_provider_ptr()
+        if left:
+            print(f"left {left}; new sessions start as {GREEN}{name}{OFF} ({target.get('email') or '?'})")
+        else:
+            print(f"already on {GREEN}{name}{OFF} ({target.get('email') or '?'})")
         return
 
     # Hand over a credential that is usable as it lands. Claude Code would renew
@@ -1197,15 +1319,76 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
 
     set_live_oauth(blk)
     set_active_ptr(name)
+    left = clear_provider_ptr()
     print(
         f"switched to {GREEN}{name}{OFF} "
         f"({target.get('email') or 'email unknown'}, {target.get('plan') or '?'})"
     )
+    if left:
+        info(f"{DIM}left {left}{OFF}")
     warn = refresh_warning(blk)
     if warn:
         info(f"{YELLOW}note:{OFF} {warn}")
     warn_running()
     print(f"{DIM}open a new terminal and run `claude` - it will start as this account.{OFF}")
+
+
+def cmd_provider_on(name=None, **_):
+    """Run new sessions through a provider instead of a saved login."""
+    if not name:
+        die(f"usage: {PROG} <provider>", USAGE_EXIT)
+    cmd = provider_command(name)
+    if not cmd:
+        die(f"'{name}' is not a provider. Register one with `{PROG} provider {name} <command>`.")
+    if not shutil.which(cmd):
+        die(f"'{cmd}' is not on your PATH, so `claude` could not start through '{name}'.")
+    if active_provider() == name:
+        print(f"already on {GREEN}{name}{OFF} (runs {cmd})")
+        return
+    set_provider_ptr(name)
+    print(f"switched to {GREEN}{name}{OFF} (runs {cmd})")
+    print(
+        f"{DIM}the next `claude` you start runs through it; sessions already open keep what they "
+        f"started with. `{PROG} off`, or hopping to an account, switches back.{OFF}"
+    )
+
+
+def cmd_provider(name=None, new=None, **_):
+    """`hop provider` lists providers; `hop provider <name> <command>` registers one."""
+    if not name:
+        provs = list_providers()
+        if not provs:
+            info(f"No providers registered. Add one with:  {PROG} provider <name> <command>")
+            return
+        on = active_provider()
+        for p in provs:
+            print(f"{'*' if p == on else ' '} {p}  runs {provider_command(p) or '?'}")
+        return
+    if not new:
+        die(f"usage: {PROG} provider <name> <command>", USAGE_EXIT)
+    check_name(name)
+    if name in COMMANDS or name in list_profiles():
+        die(f"'{name}' is already a command or an account name; pick another.")
+    if not re.match(r"^[A-Za-z0-9._/~+-]+$", new):
+        die("the command must be one word with no arguments; put arguments in a small script.")
+    profiles_dir()
+    fd = os.open(provider_path(name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(new + "\n")
+    print(f"registered provider {GREEN}{name}{OFF} (runs {new})")
+    if not shutil.which(new):
+        info(f"{YELLOW}note:{OFF} '{new}' is not on your PATH yet.")
+
+
+def cmd_off(**_):
+    """Leave the provider: new sessions use the saved login again."""
+    left = clear_provider_ptr()
+    if not left:
+        print("no provider is on")
+        return
+    cur = active_name()
+    print(f"left {left}; new sessions start as {GREEN}{cur}{OFF}" if cur
+          else f"left {left}")
 
 
 def cmd_add(name=None, yes=False, **_):
@@ -1345,6 +1528,14 @@ def cmd_add(name=None, yes=False, **_):
 def cmd_rm(name=None, yes=False, **_):
     if not name:
         die(f"usage: {PROG} rm <name>", USAGE_EXIT)
+    if name in list_providers() and not os.path.exists(profile_path(name)):
+        if not confirm(f"delete provider '{name}'?", yes):
+            die("aborted")
+        os.remove(provider_path(name))
+        if read_provider() == name:
+            clear_provider_ptr()
+        print(f"deleted {name}")
+        return
     load_profile(name)  # existence check
     if name == active_name():
         info(
@@ -1446,6 +1637,21 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
         else:
             note("warn", f"stale file {f} (contains an old credential); --fix removes it")
 
+    provs = list_providers()
+    for p in provs:
+        cmd = provider_command(p)
+        if not cmd:
+            note("error", f"provider '{p}' has no command in {provider_path(p)}")
+        elif not shutil.which(cmd):
+            note("warn", f"provider '{p}' runs '{cmd}', which is not on your PATH")
+    pptr = read_provider()
+    if pptr and pptr not in provs:
+        if fix:
+            clear_provider_ptr()
+            note("warn", f"provider pointer named '{pptr}', which is not registered", "cleared")
+        else:
+            note("error", f"provider pointer names '{pptr}', which is not registered; --fix clears it")
+
     ptr = read_ptr()
     if ptr and ptr not in names:
         note("error", f"active pointer names '{ptr}', which is not a saved account")
@@ -1476,6 +1682,8 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
                     "accountsDir": ACCOUNTS,
                     "accounts": names,
                     "active": active_name(),
+                    "provider": active_provider(),
+                    "providers": provs,
                     "reloginPlan": plan,
                     "problems": problems,
                 },
@@ -1488,6 +1696,8 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
         print(f"  config dir   {CLAUDE_DIR}")
         print(f"  accounts     {ACCOUNTS} ({len(names)} saved)")
         print(f"  active       {active_name() or '(none)'}")
+        if provs:
+            print(f"  provider     {active_provider() or '(off)'} ({len(provs)} registered)")
         for i, line in enumerate(relogin_lines(plan) if plan else []):
             print(f"  {'re-login' if i == 0 else '        '}     {line}")
         print()
@@ -1511,7 +1721,7 @@ def cmd_version(**_):
 
 # Second names for a command, kept working but not worth offering on TAB.
 ALIASES = {"ls", "current", "switch", "new", "login", "remove", "delete", "mv", "check",
-           "refresh"}
+           "refresh", "providers"}
 
 
 # Verbs and flags worth completing. Built from the tables below at call time, so
@@ -1538,12 +1748,30 @@ def cmd_shell_init(**_):
               autoload -Uz +X bashcompinit 2>/dev/null && bashcompinit 2>/dev/null
             fi
             alias hop='{PROG}'
+            claude() {{
+              local _d="${{CLAUDE_ACCOUNTS_DIR:-${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}/accounts}}" _p _c
+              _p="$(cat "$_d/provider" 2>/dev/null)"
+              if [ -n "$_p" ]; then
+                _c="$(head -n 1 "$_d/$_p.provider" 2>/dev/null)"
+                if [ -n "$_c" ] && command -v "$_c" >/dev/null 2>&1; then
+                  command "$_c" "$@"
+                  return
+                fi
+                echo "hop: provider '$_p' is on but '$_c' was not found; starting claude normally" >&2
+              fi
+              command claude "$@"
+            }}
             _claudehop_names() {{
               local d="${{CLAUDE_ACCOUNTS_DIR:-${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}/accounts}}" f n
               for f in "$d"/*.json; do
                 [ -e "$f" ] || continue
                 n="${{f##*/}}"
                 printf '%s ' "${{n%.json}}"
+              done
+              for f in "$d"/*.provider; do
+                [ -e "$f" ] || continue
+                n="${{f##*/}}"
+                printf '%s ' "${{n%.provider}}"
               done
             }}
             _claudehop_complete() {{
@@ -1579,6 +1807,8 @@ COMMANDS = {
     "renew": cmd_renew, "refresh": cmd_renew,
     "rm": cmd_rm, "remove": cmd_rm, "delete": cmd_rm,
     "rename": cmd_rename, "mv": cmd_rename,
+    "provider": cmd_provider, "providers": cmd_provider,
+    "off": cmd_off,
     "doctor": cmd_doctor, "check": cmd_doctor,
     "shell-init": cmd_shell_init,
     "help": cmd_help, "-h": cmd_help, "--help": cmd_help,
@@ -1632,8 +1862,10 @@ def main(argv: list[str]):
         # `claudehop work` is a shortcut for `claudehop use work`
         if VALID_NAME.match(cmd) and os.path.exists(profile_path(cmd)):
             fn, args = cmd_use, ["use", cmd]
+        elif VALID_NAME.match(cmd) and os.path.exists(provider_path(cmd)):
+            fn, args = cmd_provider_on, ["provider-on", cmd]
         else:
-            known = ", ".join(list_profiles())
+            known = ", ".join(list_profiles() + list_providers())
             hint = f" Saved accounts: {known}." if known else ""
             die(f"unknown command '{cmd}'. Try: {PROG} help{hint}", USAGE_EXIT)
     if len(args) > 3:

@@ -659,5 +659,76 @@ PY
 )"
 is "the sourced glue completes the same verbs" "$missing" ""
 
+# --- 17. providers: run claude through another command, not a saved login ------
+seed
+OLD_PATH="$PATH"
+mkdir -p "$TMP/pbin"
+printf '#!/usr/bin/env bash\necho "fake-bedrock: $*"\n' > "$TMP/pbin/fake-bedrock"
+printf '#!/usr/bin/env bash\necho "real-claude: $*"\n' > "$TMP/pbin/claude"
+chmod +x "$TMP/pbin/fake-bedrock" "$TMP/pbin/claude"
+export PATH="$TMP/pbin:$PATH"
+PF="$CLAUDE_ACCOUNTS_DIR/provider"
+
+out="$("$HOP" provider bedrock fake-bedrock 2>&1)"
+printf '%s' "$out" | grep -q "registered provider bedrock" && ok "provider registers a command" || bad "provider registers a command" "$out"
+is "the provider file holds only the command" "$(cat "$CLAUDE_ACCOUNTS_DIR/bedrock.provider")" "fake-bedrock"
+is "the provider file is private" "$(stat -c %a "$CLAUDE_ACCOUNTS_DIR/bedrock.provider")" "600"
+"$HOP" provider alpha fake-bedrock >/dev/null 2>&1 && bad "a provider cannot take an account's name" "accepted" || ok "a provider cannot take an account's name"
+"$HOP" provider list fake-bedrock >/dev/null 2>&1 && bad "a provider cannot take a command's name" "accepted" || ok "a provider cannot take a command's name"
+"$HOP" provider two "fake-bedrock --x" >/dev/null 2>&1 && bad "a provider command is one word" "accepted" || ok "a provider command is one word"
+
+"$HOP" bedrock >/dev/null 2>&1
+is "hop <provider> writes the pointer" "$(cat "$PF" 2>/dev/null)" "bedrock"
+is "a provider leaves the live login alone" "$(live_token)" "tok-A"
+is "a provider leaves the account pointer alone" "$(cat "$CLAUDE_ACCOUNTS_DIR/active")" "alpha"
+is "active names the provider" "$("$HOP" active)" "bedrock"
+"$HOP" active --json | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if d["provider"]=="bedrock" and d["active"]=="alpha" else 1)' \
+  && ok "active --json carries the provider and the account" || bad "active --json carries the provider and the account" "$("$HOP" active --json)"
+"$HOP" list --json | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if d["provider"]=="bedrock" and d["providers"][0]["active"] and d["providers"][0]["command"]=="fake-bedrock" else 1)' \
+  && ok "list --json lists the provider" || bad "list --json lists the provider" "$("$HOP" list --json)"
+tbl="$("$HOP" list)"
+printf '%s\n' "$tbl" | grep -qE '^\* +bedrock +runs fake-bedrock +provider' && ok "list stars the provider" || bad "list stars the provider" "$tbl"
+printf '%s\n' "$tbl" | grep -qE '^\* +alpha' && bad "list unstars the account while a provider is on" "$tbl" || ok "list unstars the account while a provider is on"
+is "hop use <provider> is the long spelling" "$("$HOP" use bedrock 2>&1 | grep -c 'already on')" "1"
+
+# The shell function is what actually reroutes `claude`.
+glue() { bash -c 'source "$1"; shift; "$@"' _ "$ROOT/shell/claudehop.sh" "$@"; }
+is "claude runs through the provider while it is on" "$(glue claude hello 2>&1)" "fake-bedrock: hello"
+glue _claudehop_names | grep -qw bedrock && ok "completion offers provider names" || bad "completion offers provider names" "$(glue _claudehop_names)"
+
+out="$("$HOP" off 2>&1)"
+printf '%s' "$out" | grep -q "left bedrock" && ok "off leaves the provider" || bad "off leaves the provider" "$out"
+[ ! -e "$PF" ] && ok "off removes the pointer" || bad "off removes the pointer" "still there"
+is "claude runs normally after off" "$(glue claude hello 2>&1)" "real-claude: hello"
+is "off with nothing on says so" "$("$HOP" off 2>&1)" "no provider is on"
+
+"$HOP" bedrock >/dev/null 2>&1
+out="$("$HOP" alpha 2>&1)"
+printf '%s' "$out" | grep -q "left bedrock" && ok "hopping to the live account leaves the provider" || bad "hopping to the live account leaves the provider" "$out"
+[ ! -e "$PF" ] && ok "...and removes the pointer" || bad "...and removes the pointer" "still there"
+"$HOP" bedrock >/dev/null 2>&1
+"$HOP" beta >/dev/null 2>&1
+[ ! -e "$PF" ] && is "hopping to another account leaves the provider and switches" "$(live_token)" "tok-B" \
+  || bad "hopping to another account leaves the provider and switches" "pointer still there"
+
+printf 'no-such-command-xyz\n' > "$CLAUDE_ACCOUNTS_DIR/ghost.provider"; chmod 600 "$CLAUDE_ACCOUNTS_DIR/ghost.provider"
+"$HOP" ghost >/dev/null 2>&1 && bad "a provider whose command is missing is refused" "accepted" || ok "a provider whose command is missing is refused"
+[ ! -e "$PF" ] && ok "...and no pointer is written" || bad "...and no pointer is written" "$(cat "$PF")"
+echo ghost > "$PF"
+err="$(glue claude hi 2>&1 >/dev/null)"
+printf '%s' "$err" | grep -q "was not found" && ok "claude warns when the provider command has gone" || bad "claude warns when the provider command has gone" "$err"
+is "...and still starts claude normally" "$(glue claude hi 2>/dev/null)" "real-claude: hi"
+"$HOP" doctor 2>&1 | grep -q "no-such-command-xyz" && ok "doctor flags a provider whose command is missing" || bad "doctor flags a provider whose command is missing" "$("$HOP" doctor 2>&1)"
+rm -f "$CLAUDE_ACCOUNTS_DIR/ghost.provider"
+"$HOP" doctor >/dev/null 2>&1 && bad "doctor fails on a pointer to a missing provider" "exit 0" || ok "doctor fails on a pointer to a missing provider"
+"$HOP" doctor --fix >/dev/null 2>&1
+[ ! -e "$PF" ] && ok "doctor --fix clears the dangling pointer" || bad "doctor --fix clears the dangling pointer" "$(cat "$PF")"
+
+"$HOP" bedrock >/dev/null 2>&1
+"$HOP" rm bedrock -y >/dev/null 2>&1
+[ ! -e "$CLAUDE_ACCOUNTS_DIR/bedrock.provider" ] && [ ! -e "$PF" ] && ok "rm deletes a provider and its pointer" || bad "rm deletes a provider and its pointer" "$(ls "$CLAUDE_ACCOUNTS_DIR")"
+is "rm on a provider leaves the accounts" "$(ls "$CLAUDE_ACCOUNTS_DIR"/*.json | wc -l | tr -d ' ')" "2"
+export PATH="$OLD_PATH"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
