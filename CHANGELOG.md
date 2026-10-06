@@ -7,6 +7,16 @@ This project follows [semantic versioning](https://semver.org/).
 
 ### Fixed
 
+- **A switch no longer races Claude Code's token refresh.** While Claude Code
+  refreshes, it holds two lock directories, reads the login, calls the token
+  endpoint and writes the result back. A switch inside that window was
+  overwritten by the old account's refreshed token, and the profile we had just
+  saved held a refresh token the server had retired. `use`, `add` and `renew`
+  now hold the same two locks, in Claude Code's order, while they read and
+  replace the live login; if they stay busy for 9 seconds (`CLAUDE_HOP_LOCK_WAIT`)
+  the command stops with nothing changed. Behaviour checked on Claude Code
+  2.1.284 by tracing it in a sandbox. `doctor` reports and `--fix` removes a lock
+  left behind by a run that died.
 - **Hopping to the account you are already on no longer swaps in a spent token.**
   Once Claude Code has rotated the live token, the saved copy is older than the
   live one. `hop <current account>` loaded the saved block, wrote the live block

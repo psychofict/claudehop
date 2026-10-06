@@ -181,6 +181,24 @@ credentials match no saved profile (you ran `/login` by hand, say), switching
 saves them under a name derived from the account's email first. You can always
 get back to a session you'd otherwise have to re-authenticate.
 
+### It takes Claude Code's refresh lock
+
+While Claude Code refreshes a token it holds two lock directories
+(`~/.claude/.oauth_refresh.lock` and `~/.claude.lock`), reads the login, calls
+the token endpoint and writes the result back. A switch that landed in that
+window would be overwritten, and the account you had just left would be saved
+with a refresh token the server had already retired. So every command that
+replaces the live login holds the same two locks, in Claude Code's order, for
+the length of the file read and write, with the network calls done first. If
+Claude Code is mid-refresh it waits up to 9 seconds, then stops with nothing
+changed (`CLAUDE_HOP_LOCK_WAIT` sets the wait). `doctor` reports a lock left
+behind by a run that died.
+
+Claude Code's side was checked on 2.1.284 by tracing it in a sandbox with the
+network cut off: it waits when another tool holds either lock and never removes
+one younger than 60 seconds. It is not a documented interface, so a later
+version may change it.
+
 ## Gotchas
 
 - Switching affects **new** `claude` processes. Sessions already running keep the
