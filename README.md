@@ -6,8 +6,8 @@
 
 <p align="center">
   <b>Hop Claude Code between several Claude accounts without logging in again.</b><br>
-  Personal Max account in the morning, work Team seat in the afternoon —
-  <i>two separate usage pools, one machine, no browser round-trip.</i>
+  Personal Max account in the morning, work Team seat in the afternoon.
+  <i>Two separate usage pools, one machine, no browser round-trip.</i>
 </p>
 
 <p align="center">
@@ -41,8 +41,8 @@ switched to home (me@gmail.com, max)
 ```
 
 Claude Code reads its login again before every message, so a hop reaches the
-`claude` sessions you already have open too, on their next message. That's it —
-that's the whole tool.
+`claude` sessions you already have open too, on their next message. That's the
+whole tool.
 
 If you'd rather not read a menu, `hop home` goes straight there.
 
@@ -80,7 +80,7 @@ dependencies.
 hop add work
 ```
 
-Quit your other `claude` sessions first — `add` will stop and tell you if you
+Quit your other `claude` sessions first. `add` will stop and tell you if you
 haven't, because a session left running can write its own token back into the
 credential store mid-login and you'd end up with the wrong account saved under
 that name.
@@ -94,7 +94,7 @@ that produces when you exit with `/exit`. **Paste the login URL into a private
 browser window.** Your normal browser is already signed in as one of your other
 accounts and will authorise that one without asking.
 
-If the login produces nothing — you changed your mind, you hit Ctrl-C — your
+If the login produces nothing (you changed your mind, you hit Ctrl-C), your
 previous credentials come back. If it does produce a login, that login is saved
 even if the terminal dies on the way out.
 
@@ -168,7 +168,7 @@ access token has aged out is left alone: `hop renew <name>` refreshes it.
 Claude Code keeps the live login under the `claudeAiOauth` key of its credential
 store. This tool keeps one saved copy of that block per account in
 `~/.claude/accounts/<name>.json` and swaps the active one in and out. The
-`mcpOAuth` key in the same store — your Vercel/Neon/etc. MCP logins — is left
+`mcpOAuth` key in the same store, which holds your Vercel/Neon/etc. MCP logins, is left
 alone, so switching accounts doesn't sign you out of anything else.
 
 | | credential store |
@@ -192,7 +192,7 @@ account's own bearer token. Set `CLAUDE_HOP_OFFLINE=1` to skip every API call.
 **Access tokens rotate.** Claude Code refreshes them every few hours and writes
 the new one straight into the credential store. A switcher that identifies the
 active profile by comparing token values therefore stops recognising it after
-the first refresh — and then loses the refreshed token when you switch away. So
+the first refresh, and then loses the refreshed token when you switch away. So
 the active profile is tracked in `accounts/active` and confirmed against the
 account UUID from the API, and every switch writes the live block back to its
 profile before loading the next one.
@@ -236,7 +236,7 @@ version may change it.
   Paste the URL into an incognito window to authenticate as a different account.
 - `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` in the environment override
   the saved login entirely. `whoami` and `doctor` warn when either is set.
-- `--long` showing `expired (auto-renews)` under `TOKEN` is normal — the access
+- `--long` showing `expired (auto-renews)` under `TOKEN` is normal. The access
   token is short lived and Claude Code renews it from the refresh token.
   `list --verify` prints `stale (renews)` for the same reason. What actually
   matters is the refresh token; see below. This is why the default listing
@@ -266,7 +266,7 @@ carry inference scope only.
 
 With several accounts the dates drift apart and you get a browser round-trip per
 account per month. Logging in early resets the whole 30 days, so the cheap move is
-to do them all on the day the earliest one comes due — after that they share one
+to do them all on the day the earliest one comes due. After that they share one
 date and it's one sitting a month. `doctor` works this out for you:
 
 ```
@@ -278,11 +278,11 @@ $ hop doctor
                2026-08-30 and they collapse to one date
 ```
 
-You also get a per-account warning starting 14 days out, and `doctor --json`
-carries the same thing under `reloginPlan` if you want to hang a reminder off it.
-`extras/` has two ready-made ways to hang one: a statusline snippet that counts
-down the last week, and a systemd user timer that renews the saved tokens daily
-and raises a desktop notification before the earliest window closes.
+You also get a per-account warning starting 14 days out. `doctor --json` carries
+the same dates under `reloginPlan`, if you want to hang a reminder off them.
+`extras/` has two ready-made ones: a statusline snippet that counts down the last
+week, and a systemd user timer. The timer renews the saved tokens daily and
+raises a desktop notification before the earliest window closes.
 
 One thing worth knowing about how this is reported. A saved profile is a snapshot
 from the last hop or sync, but Claude Code rotates the live token behind it every
@@ -297,7 +297,7 @@ copy has fallen behind, and `--fix` syncs it.
 The obvious approach is a long-lived token per account exported as
 `CLAUDE_CODE_OAUTH_TOKEN`. It doesn't hold up:
 
-- those tokens carry inference scope only — `/api/oauth/profile` answers `403 OAuth
+- those tokens carry inference scope only: `/api/oauth/profile` answers `403 OAuth
   token does not meet scope requirement`, so you can't tell whose token you're
   holding or whether it's still good;
 - they expire, and a dead one looks exactly like a live one until a request fails;
@@ -306,11 +306,30 @@ The obvious approach is a long-lived token per account exported as
 Swapping the real credential block avoids all three and matches what Claude Code
 already does to itself.
 
+## Other tools
+
+claudehop stays one readable file with no dependencies. Other tools do more, at
+a larger size:
+
+- [claude-swap](https://github.com/realiti4/claude-swap) (Python) has a live
+  usage dashboard, switches automatically before a rate limit, and starts one
+  terminal on its own account with `cswap run`.
+- [clauth](https://github.com/uwuclxdy/clauth) (Rust) does the same in a terminal
+  interface, with a fallback chain between accounts and a background process.
+- [claude-acc](https://github.com/Nemo-Illusionist/claude-code-account-switcher)
+  (Rust) ties an account to a directory, so `cd` changes it.
+
+claudehop has no per-terminal mode yet. Until it does, run a second account under
+its own `CLAUDE_CONFIG_DIR`, or use one of these. The feature lists are from their
+READMEs on 2026-10-06.
+
 ## Security
 
 Saved credentials are real, live Claude logins. `accounts/` is `700`, every
-profile is `600`, and writes are atomic. Nothing is ever sent anywhere except
-`api.anthropic.com` to resolve an email and plan. See
+profile is `600`, and writes are atomic. Tokens go only to Anthropic:
+`api.anthropic.com` (who you are, and your usage) and `platform.claude.com`
+(renewing a token, only when you run `renew` or hop to an account whose access
+token has aged out). See
 [SECURITY.md](https://github.com/psychofict/claudehop/blob/master/SECURITY.md)
 for the threat model and how to report a problem.
 
@@ -322,7 +341,7 @@ shell/claudehop.sh           PATH, tab-completion, back-compat aliases
 extras/statusline-snippet.sh show the active account in the Claude Code statusline
 install.sh                   symlink/copy into ~/.claude, wire up the rc file
 pyproject.toml               packaging: one module, no dependencies, two commands
-test/test-switch.sh          about 150 checks against a throwaway config dir, no network
+test/test-switch.sh          about 190 checks against a throwaway config dir, no network
 assets/                      logo, icon, cover and social preview (svg sources + png)
 ```
 
@@ -332,7 +351,7 @@ assets/                      logo, icon, cover and social preview (svg sources +
 ./test/test-switch.sh
 ```
 
-Runs entirely inside a temp dir with fake credentials — it never reads or writes
+Runs entirely inside a temp dir with fake credentials. It never reads or writes
 a real account, and never touches the network. Covers the swap, mcpOAuth
 preservation, token rotation, the stash path, concurrent switches, the macOS
 keychain backend (through a stand-in `security`), `add` rolling back a failed
@@ -341,7 +360,7 @@ output, table layout, housekeeping and file permissions.
 
 ## Contributing
 
-Issues and pull requests welcome — see
+Issues and pull requests are welcome; see
 [CONTRIBUTING.md](https://github.com/psychofict/claudehop/blob/master/CONTRIBUTING.md).
 If `claudehop` saved you a browser round-trip this morning, a ⭐ on
 [GitHub](https://github.com/psychofict/claudehop) helps others find it.
