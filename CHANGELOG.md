@@ -48,6 +48,19 @@ This project follows [semantic versioning](https://semver.org/).
   `provider` and `providers` keys. While a provider is on, `hop active` prints its
   name instead of the account name.
 
+### Changed
+
+- **The docs and the note after a hop no longer say open sessions keep their
+  account.** They do not. Claude Code reads the credential store again before
+  each message: with a fake endpoint, a session sent its first message with the
+  old login and, two seconds after the file was swapped, its second message with
+  the new one (Linux, Claude Code 2.1.284, headless mode). A hop therefore moves
+  every open `claude` on its next message, a conversation in progress included,
+  and one `hop` cannot give two terminals two accounts. The README headline
+  promised that, and now says what it does. macOS reads from the keychain, which
+  claude-swap's documentation says is cached for about half a minute; that is
+  not tested here.
+
 ## [1.5.0] — 2026-08-31
 
 ### Fixed

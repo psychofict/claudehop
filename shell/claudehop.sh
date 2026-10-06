@@ -9,9 +9,9 @@
 #   claudehop add <name>      log in as a new account and save it
 #   claudehop whoami          who am I right now
 #
-# Hopping rewrites the claudeAiOauth block in Claude Code's credential store,
-# so it takes effect for every NEW `claude` you start. Sessions already running
-# keep the account they started with.
+# Hopping rewrites the claudeAiOauth block in Claude Code's credential store.
+# Claude Code reads it again before each message, so sessions already running
+# follow the hop on their next message.
 #
 # https://github.com/psychofict/claudehop
 
