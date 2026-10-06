@@ -17,6 +17,11 @@ Thanks for looking. This is a small tool and it intends to stay small.
    needs a real account is not a test we can run.
 4. **Secrets never get printed.** Not in `--json`, not in errors, not in debug
    output.
+5. **Say what you measured.** A claim about how Claude Code behaves names the
+   version it was checked on and how. The ones in the README were checked in a
+   throwaway home with the network cut off (`unshare -rn` on Linux), tracing
+   file access with `strace` and pointing `ANTHROPIC_BASE_URL` at a local fake
+   server. Check again after a Claude Code upgrade.
 
 ## Working on it
 
@@ -24,7 +29,7 @@ Thanks for looking. This is a small tool and it intends to stay small.
 git clone https://github.com/psychofict/claudehop.git
 cd claudehop
 ./install.sh              # symlinks, so your edits are live immediately
-./test/test-switch.sh     # about 150 checks, under ten seconds
+./test/test-switch.sh     # about 190 checks, under fifteen seconds
 ```
 
 Before opening a pull request:
@@ -41,6 +46,12 @@ pull request.
 
 ## Things worth doing
 
+- `hop run <name>`: one terminal on its own account, under its own
+  `CLAUDE_CONFIG_DIR`. A global hop moves every open session, so this is the
+  only way to use two accounts at once. The hard part is the token: a session's
+  copy rotates on its own, so it has to be captured back when the session ends.
+- Check whether an open interactive session (not headless mode) follows a hop,
+  and how long macOS takes to notice. The README says what was measured and where.
 - Verification of the macOS keychain backend against a real Mac. It is written
   against Claude Code's own `security` calls and tested through a stand-in, but
   nobody has run it on real hardware yet.

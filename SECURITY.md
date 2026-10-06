@@ -16,9 +16,17 @@ What the tool does about that:
 - No `.bak` copies of profiles are kept. `claudehop doctor --fix` removes any
   left by an older version.
 - Tokens never appear in `--json` output, in log lines, or in any error message.
-- The only network call is `GET https://api.anthropic.com/api/oauth/profile`
-  with the account's own bearer token, to resolve an email and plan.
-  `CLAUDE_HOP_OFFLINE=1` disables it.
+- Network calls go only to Anthropic, each with the account's own token:
+  `GET https://api.anthropic.com/api/oauth/profile` (email and plan),
+  `GET https://api.anthropic.com/api/oauth/usage` (`hop usage`), and
+  `POST https://platform.claude.com/v1/oauth/token` (renewing a token, from
+  `renew` or a hop to an account whose access token has aged out).
+  Requests say they come from claudehop; the tool does not pose as Claude Code.
+  `CLAUDE_HOP_OFFLINE=1` disables all of them.
+- `accounts/.usage-cache` holds usage percentages and reset times, never a token.
+- While it replaces the live login, the tool briefly holds the lock directories
+  Claude Code uses for its own token refresh (`<config dir>/.oauth_refresh.lock`
+  and `<config dir>.lock`). `doctor` reports one that a crashed run left behind.
 
 ## Known limits
 
