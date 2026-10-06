@@ -5,6 +5,21 @@ This project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Hopping to the account you are already on no longer swaps in a spent token.**
+  Once Claude Code has rotated the live token, the saved copy is older than the
+  live one. `hop <current account>` loaded the saved block, wrote the live block
+  into the same profile, then put the saved (older) block back as the login, so
+  the live store held a refresh token that had already been used. Every further
+  run flipped the two again. It now keeps the live login and brings the saved
+  copy up to date.
+- **`add`, `save` and `rename` refuse names that would hide something.** An
+  account called `list` could never be reached as `hop list`, and one named after
+  a provider shadowed it. Accounts that already have such a name keep working.
+- **`doctor` reports a profile it cannot parse** and carries on, instead of
+  stopping on the first broken file, and the scan for the live account skips it.
+
 ### Added
 
 - **Providers.** `hop provider <name> <command>` registers a way of running Claude

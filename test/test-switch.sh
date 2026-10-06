@@ -99,6 +99,22 @@ is "switching back restores the rotated token"   "$( "$HOP" use beta >/dev/null 
   && ok "no junk unsaved-* profile created" \
   || bad "no junk unsaved-* profile created" "found $(ls "$CLAUDE_ACCOUNTS_DIR"/unsaved-*.json)"
 
+# --- 2b. hopping to the account you are already on, after a rotation ----------
+# The saved copy is stale and the live token is the newer one. Loading the saved
+# block and writing it back put the spent refresh token into the live store, and
+# every further run flipped them again, so one run is the sharper check.
+seed
+python3 -c "
+import json,os
+p=os.environ['CLAUDE_CONFIG_DIR']+'/.credentials.json'; d=json.load(open(p))
+d['claudeAiOauth']['accessToken']='tok-A-refreshed'; d['claudeAiOauth']['refreshToken']='r-A-refreshed'
+json.dump(d,open(p,'w'))"
+"$HOP" use alpha >/dev/null 2>&1
+is "hopping to the current account keeps the rotated token"   "$(live_token)" "tok-A-refreshed"
+is "...and its refresh token"  "$(jget "$TMP/.credentials.json" claudeAiOauth.refreshToken)" "r-A-refreshed"
+is "...and brings the saved copy up to date"  "$(saved_token alpha)" "tok-A-refreshed"
+is "...and keeps the mcpOAuth block"  "$(jget "$TMP/.credentials.json" 'mcpOAuth.vercel|x.accessToken')" "vca_KEEPME"
+
 # --- 3. a login we do not recognise is stashed, never overwritten -------------
 seed
 python3 -c "
@@ -729,6 +745,38 @@ rm -f "$CLAUDE_ACCOUNTS_DIR/ghost.provider"
 [ ! -e "$CLAUDE_ACCOUNTS_DIR/bedrock.provider" ] && [ ! -e "$PF" ] && ok "rm deletes a provider and its pointer" || bad "rm deletes a provider and its pointer" "$(ls "$CLAUDE_ACCOUNTS_DIR")"
 is "rm on a provider leaves the accounts" "$(ls "$CLAUDE_ACCOUNTS_DIR"/*.json | wc -l | tr -d ' ')" "2"
 export PATH="$OLD_PATH"
+
+# --- 18. names that would hide something are refused ---------------------------
+seed
+out="$("$HOP" rename beta list 2>&1)"
+[ -e "$CLAUDE_ACCOUNTS_DIR/list.json" ] && bad "rename refuses a command's name" "created list.json" \
+  || ok "rename refuses a command's name"
+printf '%s' "$out" | grep -q "command" && ok "...and says why" || bad "...and says why" "$out"
+printf '#!/bin/sh\n' > "$TMP/bin/launcher"; chmod +x "$TMP/bin/launcher"
+OLD_PATH="$PATH"; export PATH="$TMP/bin:$PATH"
+"$HOP" provider bedrock launcher >/dev/null 2>&1
+"$HOP" rename beta bedrock >/dev/null 2>&1
+[ -e "$CLAUDE_ACCOUNTS_DIR/bedrock.json" ] && bad "rename refuses a provider's name" "created bedrock.json" \
+  || ok "rename refuses a provider's name"
+"$HOP" save list -y >/dev/null 2>&1
+[ -e "$CLAUDE_ACCOUNTS_DIR/list.json" ] && bad "save refuses a command's name" "created list.json" \
+  || ok "save refuses a command's name"
+export PATH="$OLD_PATH"
+# an account that already has such a name keeps working (it predates the check)
+cp "$CLAUDE_ACCOUNTS_DIR/beta.json" "$CLAUDE_ACCOUNTS_DIR/check.json"
+"$HOP" use check >/dev/null 2>&1 && is "an existing account with a command's name can still be used" "$(live_token)" "tok-B" \
+  || bad "an existing account with a command's name can still be used" "use failed"
+
+# --- 19. doctor survives a profile it cannot parse -----------------------------
+seed
+printf '{"claudeAiOauth": {"acc' > "$CLAUDE_ACCOUNTS_DIR/beta.json"
+chmod 600 "$CLAUDE_ACCOUNTS_DIR/beta.json"
+out="$("$HOP" doctor 2>&1)"; rc=$?
+printf '%s' "$out" | grep -q "beta.json is empty or not valid JSON" && ok "doctor names the profile it cannot read" \
+  || bad "doctor names the profile it cannot read" "$out"
+[ "$rc" -eq 1 ] && ok "...and exits non-zero" || bad "...and exits non-zero" "rc=$rc"
+printf '%s' "$out" | grep -q "no problems found" && bad "...and does not call it healthy" "$out" || ok "...and does not call it healthy"
+is "the live account is still found past the broken profile" "$("$HOP" active 2>/dev/null)" "alpha"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
