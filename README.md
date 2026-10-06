@@ -128,6 +128,7 @@ command must be a single word; put arguments in the launcher.
 
 ```bash
 hop whoami           # who am I right now (asks the API)
+hop usage            # 5-hour and 7-day usage of every account
 hop renew            # refresh the saved tokens; one name, or all of them
 hop --long           # add token expiry and save dates to the listing
 hop list --verify    # check every saved token against the API
@@ -141,6 +142,26 @@ hop shell-init       # shell glue for a pip install: alias + tab-completion
 output with no secrets in it, for scripts and statuslines. `hop active` prints
 just the active name with no network call. `hop use <name>` is the long spelling
 of `hop <name>`, and `hop sync` writes the live login back to its own file.
+
+## Usage
+
+```
+$ hop usage
+   NAME   5 HOURS            7 DAYS             NOTE
+   home   98%  resets 24m    61%  resets 4d23h
+*  work   42%  resets 2h14m  18%  resets 3d4h
+```
+
+How much of each account's 5-hour and 7-day allowance is spent, and when each
+window resets, read from the endpoint behind Claude Code's own `/usage`. That
+endpoint limits clients other than Claude Code, and a throttled token can stay
+blocked for about half an hour (a `Retry-After` of 1524 seconds has been seen).
+So `hop usage` asks only when you run it, remembers the last good reading in
+`accounts/.usage-cache` (percentages and times, no tokens), and does not ask
+again until the server's `Retry-After` has passed. A throttled row shows the
+last reading and its age. Nothing polls in the background, and an account whose
+access token has aged out is left alone: `hop renew <name>` refreshes it.
+`hop usage <name>` checks one account, `--json` is for scripts.
 
 ## How it works
 

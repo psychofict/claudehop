@@ -32,6 +32,12 @@ This project follows [semantic versioning](https://semver.org/).
 
 ### Added
 
+- **`hop usage`** shows each account's 5-hour and 7-day usage and when each
+  window resets, from the endpoint behind Claude Code's `/usage`. That endpoint
+  throttles clients other than Claude Code, so the command asks only when run,
+  keeps the last good reading in `accounts/.usage-cache` (no tokens), and waits
+  out the server's `Retry-After` before asking again. Throttled, rejected or
+  aged-out accounts show their last reading with its age. `--json` for scripts.
 - **Providers.** `hop provider <name> <command>` registers a way of running Claude
   Code that is not a saved login (Amazon Bedrock, Vertex, a gateway), and
   `hop <name>` switches new sessions to it. `hop off`, or hopping to any account,

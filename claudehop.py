@@ -24,6 +24,7 @@ glue reads the switch, so it only applies in shells that have the glue loaded.
 Now and then:
 
   hop whoami           who is logged in right now (asks the API)
+  hop usage [name]     5-hour and 7-day usage per account (asks the API, remembers the answer)
   hop renew [name]     refresh the saved tokens (all of them, or just one)
   hop save <name>      save a login you did by hand, under a name
   hop list --long      token expiry and when each account was saved
@@ -1076,6 +1077,213 @@ def sync_live_before_switch(live: dict) -> str | None:
     return name
 
 
+# ---------------------------------------------------------------------- usage
+#
+# How much of each account's 5-hour and 7-day allowance is spent, from the same
+# endpoint Claude Code's own /usage reads. It budgets requests from clients
+# that are not Claude Code, and a throttled token is blocked for a long time
+# (a Retry-After of about 25 minutes was seen), so this runs only when asked,
+# keeps the last good reading on disk, and never asks again before the server's
+# Retry-After has passed. The cache holds percentages and times, no tokens.
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+USAGE_CACHE = os.path.join(ACCOUNTS, ".usage-cache")
+USAGE_FRESH_S = 60  # a reading this young is shown again without asking
+USAGE_THROTTLE_DEFAULT_S = 600  # when a 429 names no Retry-After
+USAGE_THROTTLE_MAX_S = 3600
+
+
+def api_usage(token: str, timeout: float = API_TIMEOUT) -> tuple[int, dict, float | None]:
+    """(status, body, Retry-After in seconds if the server sent one)."""
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        USAGE_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": f"{PROG}/{VERSION}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode()), None
+    except urllib.error.HTTPError as e:
+        try:
+            retry = float(e.headers.get("Retry-After") or "")
+        except ValueError:
+            retry = None
+        try:
+            body = json.loads(e.read().decode())
+        except Exception:
+            body = {}
+        return e.code, body, retry
+    except Exception as e:
+        return 0, {"error": str(e)}, None
+
+
+def parse_usage(body: dict) -> dict:
+    """The windows in a usage reply: {"five_hour": {"pct": 42.0, "resetsAt": "..."}, ...}.
+
+    Anything that is not a window with a numeric `utilization` (a null window,
+    a field we do not know) is skipped, so a new field never breaks the table.
+    """
+    out = {}
+    for key, win in (body or {}).items():
+        if not isinstance(win, dict):
+            continue
+        pct = win.get("utilization")
+        if isinstance(pct, (int, float)) and not isinstance(pct, bool):
+            out[key] = {"pct": float(pct), "resetsAt": win.get("resets_at")}
+    return out
+
+
+def seconds_until(iso: str | None) -> float | None:
+    if not iso or not isinstance(iso, str):
+        return None
+    from datetime import datetime
+
+    try:
+        when = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        return None
+    return when.timestamp() - time.time()
+
+
+def countdown(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    if days:
+        return f"{days}d{hours}h"
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m"
+
+
+def read_usage_cache() -> dict:
+    try:
+        with open(USAGE_CACHE) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def usage_row(entry: dict, block: dict, now: float, renew_hint: str = "") -> dict:
+    """One account's reading: the cached entry, refreshed if it is allowed and due.
+
+    Returns the entry to keep (windows, fetchedAt, throttledUntil) plus a `note`
+    that says why a reading is old or missing.
+    """
+    entry = dict(entry or {})
+    if OFFLINE:
+        entry["note"] = "offline mode" if entry.get("windows") else "offline mode, nothing cached"
+        return entry
+    until = entry.get("throttledUntil") or 0
+    if until > now:
+        entry["note"] = f"throttled by the server, ask again in {countdown(until - now)}"
+        return entry
+    fetched = entry.get("fetchedAt") or 0
+    if entry.get("windows") and now - fetched < USAGE_FRESH_S:
+        return entry
+    tok = block.get("accessToken")
+    if not tok:
+        entry["note"] = "no saved login"
+    elif expired(block):
+        entry["note"] = f"access token aged out; {renew_hint}" if renew_hint else "access token aged out"
+    else:
+        status, body, retry = api_usage(tok)
+        if status == 200:
+            entry["windows"] = parse_usage(body)
+            entry["fetchedAt"] = now
+            entry.pop("throttledUntil", None)
+        elif status == 429:
+            wait = min(retry if retry is not None else USAGE_THROTTLE_DEFAULT_S, USAGE_THROTTLE_MAX_S)
+            entry["throttledUntil"] = now + wait
+            entry["note"] = f"throttled by the server, ask again in {countdown(wait)}"
+        elif status in (401, 403):
+            entry["note"] = "the server rejected this token"
+        else:
+            entry["note"] = f"http {status}" if status else "could not reach the server"
+    return entry
+
+
+def cmd_usage(name=None, as_json=False, **_):
+    """Where each account stands against its 5-hour and 7-day limits."""
+    names = list_profiles()
+    if name:
+        load_profile(name)  # dies with the usual message if there is no such account
+        names = [name]
+    if not names:
+        die(f"no saved accounts. Add one with `{PROG} add <name>`.")
+    profiles = {n: load_profile(n) for n in names}
+    cur = active_name()
+    blocks = effective_blocks(profiles, cur, live_oauth())
+    cache = read_usage_cache()
+    now = time.time()
+
+    def renew_hint(n: str) -> str:
+        if n == cur:
+            return "Claude Code renews it on its next call"
+        return f"`{PROG} renew {n}` refreshes it"
+
+    rows = {n: usage_row(cache.get(n), blocks[n], now, renew_hint(n)) for n in names}
+    for n, row in rows.items():
+        cache[n] = {k: v for k, v in row.items() if k != "note"}
+    cache = {n: v for n, v in cache.items() if n in list_profiles()}
+    try:
+        profiles_dir()
+        write_json_secure(USAGE_CACHE, cache)
+    except OSError:
+        pass  # a cache we cannot write only costs the next run a request
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "accounts": [
+                        {
+                            "name": n,
+                            "active": n == cur,
+                            "windows": rows[n].get("windows") or {},
+                            "fetchedAt": rows[n].get("fetchedAt"),
+                            "throttledUntil": rows[n].get("throttledUntil"),
+                            "note": rows[n].get("note"),
+                        }
+                        for n in names
+                    ]
+                },
+                indent=2,
+            )
+        )
+        return
+
+    def cell(row: dict, key: str) -> str:
+        win = (row.get("windows") or {}).get(key)
+        if not win:
+            return "-"
+        left = seconds_until(win.get("resetsAt"))
+        return f"{win['pct']:.0f}%" + (f"  resets {countdown(left)}" if left and left > 0 else "")
+
+    table, lit = [], set()
+    for i, n in enumerate(names):
+        row = rows[n]
+        note = row.get("note") or ""
+        age = now - row["fetchedAt"] if row.get("windows") and row.get("fetchedAt") else 0
+        if age > USAGE_FRESH_S:
+            note = f"{note}; " if note else ""
+            note += f"last reading {countdown(age)} ago"
+        table.append(("*" if n == cur else " ", n, cell(row, "five_hour"), cell(row, "seven_day"), note))
+        if n == cur:
+            lit.add(i)
+    print_table(("", "NAME", "5 HOURS", "7 DAYS", "NOTE"), table, lit)
+
+
 # ------------------------------------------------------------------- commands
 
 
@@ -1954,7 +2162,7 @@ def cmd_shell_init(**_):
                 COMPREPLY=($(compgen -W "{verbs} $names" -- "$cur"))
               else
                 case "$prev" in
-                  use|switch|rm|remove|delete|rename|mv|save|add|new|login|renew|refresh)
+                  use|switch|rm|remove|delete|rename|mv|save|add|new|login|renew|refresh|usage)
                     COMPREPLY=($(compgen -W "$names" -- "$cur")) ;;
                   *)
                     COMPREPLY=($(compgen -W "{flags}" -- "$cur")) ;;
@@ -1978,6 +2186,7 @@ COMMANDS = {
     "renew": cmd_renew, "refresh": cmd_renew,
     "rm": cmd_rm, "remove": cmd_rm, "delete": cmd_rm,
     "rename": cmd_rename, "mv": cmd_rename,
+    "usage": cmd_usage,
     "provider": cmd_provider, "providers": cmd_provider,
     "off": cmd_off,
     "doctor": cmd_doctor, "check": cmd_doctor,
