@@ -82,7 +82,7 @@ import sys
 import textwrap
 import time
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 PROG = "claudehop"
 
 
@@ -1143,8 +1143,10 @@ def seconds_until(iso: str | None) -> float | None:
         return None
     from datetime import datetime
 
+    # Python 3.9's fromisoformat takes only 3 or 6 fractional digits and no `Z`.
+    iso = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], iso.replace("Z", "+00:00"))
     try:
-        when = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        when = datetime.fromisoformat(iso)
     except ValueError:
         return None
     if when.tzinfo is None:
