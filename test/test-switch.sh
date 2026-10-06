@@ -841,5 +841,109 @@ mkdir "$PRIMARY"
 rmdir "$PRIMARY"
 unset CLAUDE_HOP_LOCK_WAIT
 
+# --- 21. usage: where each account stands against its limits --------------------
+# Driven in-process with a fake endpoint. The real one budgets requests from
+# clients that are not Claude Code, so the command asks only when run, remembers
+# the last good reading, and waits out a Retry-After.
+usage_run() {  # usage_run <python that defines `responses`> [json] [name]
+  HOP="$HOP" RESPONSES="$1" AS_JSON="${2:-}" ONLY="${3:-}" python3 - <<'PY'
+import importlib.machinery, importlib.util, os, json, datetime
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+ca.OFFLINE = os.environ.get("USAGE_OFFLINE") == "1"
+def at(**kw):
+    return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(**kw)).isoformat()
+ns = {"at": at}
+exec(os.environ["RESPONSES"], ns)
+calls = []
+def fake(tok, timeout=0):
+    calls.append(tok)
+    return ns["responses"][tok]
+ca.api_usage = fake
+ca.cmd_usage(name=os.environ["ONLY"] or None, as_json=bool(os.environ["AS_JSON"]))
+print("CALLS=%d" % len(calls))
+PY
+}
+calls_of() { printf '%s' "$1" | sed -n 's/^CALLS=//p'; }
+UC="$CLAUDE_ACCOUNTS_DIR/.usage-cache"
+two_ok='responses = {
+  "tok-A": (200, {"five_hour": {"utilization": 42.0, "resets_at": at(hours=2, minutes=14, seconds=30)},
+                  "seven_day": {"utilization": 18, "resets_at": at(days=3, hours=4, minutes=1)},
+                  "seven_day_opus": None, "something_new": 5}, None),
+  "tok-B": (200, {"five_hour": {"utilization": 7.4, "resets_at": at(hours=4)},
+                  "seven_day": {"utilization": 90, "resets_at": at(days=1)}}, None)}'
+
+seed; rm -f "$UC"
+out="$(usage_run "$two_ok")"
+printf '%s' "$out" | grep -E "alpha" | grep -q "42%.*resets 2h1[45]m.*18%.*resets 3d4h" \
+  && ok "usage shows both windows and when each resets" || bad "usage shows both windows and when each resets" "$out"
+printf '%s' "$out" | grep -E "beta" | grep -q "7%.*90%" && ok "...for every saved account" || bad "...for every saved account" "$out"
+printf '%s' "$out" | grep -E "^\*" | grep -q alpha && ok "...with the live account starred" || bad "...with the live account starred" "$out"
+is "...one request per account" "$(calls_of "$out")" "2"
+[ "$(stat -c %a "$UC" 2>/dev/null || stat -f %Lp "$UC")" = "600" ] && ok "the cache is private" || bad "the cache is private" "$(ls -l "$UC")"
+grep -q "tok-A\|tok-B" "$UC" && bad "the cache holds no tokens" "found one" || ok "the cache holds no tokens"
+"$HOP" list 2>&1 | grep -qi "usage" && bad "list ignores the cache" "listed" || ok "list ignores the cache"
+
+out="$(usage_run "$two_ok")"
+is "a reading under a minute old is not asked for again" "$(calls_of "$out")" "0"
+printf '%s' "$out" | grep -q "42%" && ok "...and is still shown" || bad "...and is still shown" "$out"
+
+# a 429 is remembered, and the last good reading stays on screen
+python3 -c "
+import json,os
+p=os.environ['CLAUDE_ACCOUNTS_DIR']+'/.usage-cache'; d=json.load(open(p))
+for v in d.values(): v['fetchedAt'] -= 600
+json.dump(d,open(p,'w'))"
+throttled='responses = {"tok-A": (429, {}, 1500.0), "tok-B": (429, {}, 1500.0)}'
+out="$(usage_run "$throttled")"
+is "a 429 is asked about once per account" "$(calls_of "$out")" "2"
+printf '%s' "$out" | grep -E "alpha" | grep -q "42%.*throttled.*2[45]m.*last reading 10m ago" \
+  && ok "...the last good reading stays, with its age" || bad "...the last good reading stays, with its age" "$out"
+out="$(usage_run "$throttled")"
+is "...and nobody asks again before the Retry-After" "$(calls_of "$out")" "0"
+printf '%s' "$out" | grep -q "throttled" && ok "...and the table still says why" || bad "...and the table still says why" "$out"
+
+seed; rm -f "$UC"
+out="$(usage_run "$throttled")"
+printf '%s' "$out" | grep -E "alpha" | grep -q "throttled" \
+  && printf '%s' "$out" | grep -E "alpha" | grep -q -- " -  .* - " \
+  && ok "a throttled first run shows dashes, not an error" || bad "a throttled first run shows dashes, not an error" "$out"
+seed; rm -f "$UC"
+usage_run 'responses = {"tok-A": (429, {}, None), "tok-B": (429, {}, None)}' >/dev/null
+is "...and a 429 without Retry-After still backs off" "$(calls_of "$(usage_run "$throttled")")" "0"
+
+seed; rm -f "$UC"; poke beta expiresAt "1"
+out="$(usage_run "$two_ok")"
+is "an aged-out token is not sent" "$(calls_of "$out")" "1"
+printf '%s' "$out" | grep -E "beta" | grep -q "aged out" && ok "...and the row says what to do" || bad "...and the row says what to do" "$out"
+
+seed; rm -f "$UC"
+out="$(usage_run 'responses = {"tok-A": (401, {}, None), "tok-B": (0, {"error": "x"}, None)}')"
+printf '%s' "$out" | grep -E "alpha" | grep -q "rejected" && printf '%s' "$out" | grep -E "beta" | grep -q "could not reach" \
+  && ok "a rejected token and an unreachable server read differently" || bad "a rejected token and an unreachable server read differently" "$out"
+
+seed; rm -f "$UC"
+out="$(usage_run "$two_ok" json)"
+printf '%s' "$out" | sed '/^CALLS=/d' | python3 -c "
+import json,sys
+d=json.load(sys.stdin)['accounts']
+a=[x for x in d if x['name']=='alpha'][0]
+assert a['active'] is True and a['windows']['five_hour']['pct']==42.0 and a['note'] is None
+assert 'seven_day_opus' not in a['windows'] and 'something_new' not in a['windows']
+print('ok')" 2>/dev/null | grep -q ok && ok "--json carries the windows and skips what is not one" || bad "--json carries the windows and skips what is not one" "$out"
+
+seed; rm -f "$UC"
+out="$(usage_run "$two_ok" "" beta)"
+is "naming an account asks about that one only" "$(calls_of "$out")" "1"
+printf '%s' "$out" | grep -q alpha && bad "...and shows only it" "$out" || ok "...and shows only it"
+"$HOP" usage nosuch >/dev/null 2>&1 && bad "an unknown account is an error" "exit 0" || ok "an unknown account is an error"
+
+seed; rm -f "$UC"
+out="$(USAGE_OFFLINE=1 usage_run "$two_ok")"
+is "offline mode makes no request" "$(calls_of "$out")" "0"
+printf '%s' "$out" | grep -q "offline" && ok "...and says so" || bad "...and says so" "$out"
+seed
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
