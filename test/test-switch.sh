@@ -795,6 +795,12 @@ for d in reversed(sys.argv[2:]): os.rmdir(d)" "$@" &
   for _ in $(seq 50); do [ -d "${*: -1}" ] && break; sleep 0.1; done
 }
 export CLAUDE_HOP_LOCK_WAIT=1
+age_by() {  # age_by <seconds> <path>...  (BSD touch has no relative -d)
+  python3 -c "
+import os, sys, time
+t = time.time() - float(sys.argv[1])
+for p in sys.argv[2:]: os.utime(p, (t, t))" "$@"
+}
 
 seed
 "$HOP" use beta >/dev/null 2>&1
@@ -819,7 +825,7 @@ hold 3 "$LEGACY"
 wait "$HOLDER"
 
 seed
-mkdir "$PRIMARY" "$LEGACY"; touch -d '-2 minutes' "$PRIMARY" "$LEGACY"
+mkdir "$PRIMARY" "$LEGACY"; age_by 120 "$PRIMARY" "$LEGACY"
 "$HOP" use beta >/dev/null 2>&1
 is "a lock nobody has touched for 60s is taken over"  "$(live_token)" "tok-B"
 [ ! -e "$PRIMARY" ] && [ ! -e "$LEGACY" ] && ok "...and released afterwards" || bad "...and released afterwards" "still there"
@@ -831,7 +837,7 @@ is "add stops before logging you out when Claude Code holds the lock"  "$(live_t
 wait "$HOLDER"
 
 seed
-mkdir "$PRIMARY"; touch -d '-5 minutes' "$PRIMARY"
+mkdir "$PRIMARY"; age_by 300 "$PRIMARY"
 "$HOP" doctor 2>&1 | grep -q "stale lock" && ok "doctor reports a lock nobody has touched for minutes" \
   || bad "doctor reports a lock nobody has touched for minutes" "$("$HOP" doctor 2>&1)"
 "$HOP" doctor --fix >/dev/null 2>&1
@@ -882,7 +888,7 @@ printf '%s' "$out" | grep -E "beta" | grep -q "7%.*90%" && ok "...for every save
 printf '%s' "$out" | grep -E "^\*" | grep -q alpha && ok "...with the live account starred" || bad "...with the live account starred" "$out"
 is "...one request per account" "$(calls_of "$out")" "2"
 [ "$(stat -c %a "$UC" 2>/dev/null || stat -f %Lp "$UC")" = "600" ] && ok "the cache is private" || bad "the cache is private" "$(ls -l "$UC")"
-grep -q "tok-A\|tok-B" "$UC" && bad "the cache holds no tokens" "found one" || ok "the cache holds no tokens"
+grep -qE "tok-A|tok-B" "$UC" && bad "the cache holds no tokens" "found one" || ok "the cache holds no tokens"
 "$HOP" list 2>&1 | grep -qi "usage" && bad "list ignores the cache" "listed" || ok "list ignores the cache"
 
 out="$(usage_run "$two_ok")"
