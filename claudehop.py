@@ -25,6 +25,7 @@ Now and then:
 
   hop whoami           who is logged in right now (asks the API)
   hop usage [name]     5-hour and 7-day usage per account (asks the API, remembers the answer)
+  hop run <name> [..]  claude as that account in this terminal only; the rest goes to claude
   hop renew [name]     refresh the saved tokens (all of them, or just one)
   hop save <name>      save a login you did by hand, under a name
   hop list --long      token expiry and when each account was saved
@@ -879,6 +880,10 @@ def effective_blocks(
     ends up calling a perfectly good login expired.
     """
     blocks = {n: p.get(OAUTH_KEY, {}) or {} for n, p in profiles.items()}
+    for n in blocks:  # a `run` session rotates its own copy, which is then the newest
+        newest = run_block(n)
+        if newest and _issued_later(newest, blocks[n]):
+            blocks[n] = newest
     if cur and live and cur in blocks:
         blocks[cur] = live
     return blocks
@@ -1285,6 +1290,311 @@ def cmd_usage(name=None, as_json=False, **_):
     print_table(("", "NAME", "5 HOURS", "7 DAYS", "NOTE"), table, lit)
 
 
+# ------------------------------------------------------------------ run sessions
+#
+# `hop run <name>` starts one `claude` on its own account without touching the
+# live login, so two terminals can be on two accounts at once. Claude Code reads
+# its login again before each message, so a global hop cannot do that.
+#
+# Each account gets a config home of its own, <accounts>/.run/<name>/, and
+# `claude` is pointed at it with CLAUDE_CONFIG_DIR. That home holds the account's
+# login and a copy of the global config; everything that defines how Claude
+# behaves for you (settings, CLAUDE.md, skills, agents, plugins, projects, prompt
+# history) is a symlink to the real one, so a run session looks like your normal
+# one. The login in that home is the one Claude Code rotates, so it is the newest
+# copy while a session lives; it is saved back to the profile when the session
+# ends, and reconciled by expiry the next time (and by `doctor` after a crash).
+#
+# Never two copies of one login: the live account is not given a second home
+# (it just runs `claude`), and while a session is open `use` and `renew` leave
+# its account alone, because rotating a refresh token under it would sign one of
+# the two out.
+
+RUN_DIR = os.path.join(ACCOUNTS, ".run")
+
+# Linked into every run home. Credentials and identity are deliberately absent,
+# as are caches and per-session state. CLAUDE_HOP_SHARE adds names to the list.
+SHARED_ENTRIES = (
+    "CLAUDE.md", "settings.json", "settings.local.json", "keybindings.json",
+    "agents", "commands", "hooks", "output-styles", "skills", "plugins",
+    "projects", "plans", "todos", "file-history", "history.jsonl",
+)
+NEVER_SHARED = {".credentials.json", ".credentials.json.bak", ".claude.json", "accounts"}
+
+
+def run_home(name: str) -> str:
+    return os.path.join(RUN_DIR, name)
+
+
+def run_creds_path(name: str) -> str:
+    return os.path.join(run_home(name), ".credentials.json")
+
+
+def global_config_path() -> str:
+    """Where Claude Code keeps its global config: inside the config dir if
+    CLAUDE_CONFIG_DIR is set, otherwise ~/.claude.json beside it."""
+    if env("CLAUDE_CONFIG_DIR"):
+        return os.path.join(CLAUDE_DIR, ".claude.json")
+    return os.path.join(HOME, ".claude.json")
+
+
+def _proc_start(pid: int) -> str:
+    """The start time /proc records for a pid; it tells a reused pid from ours."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return ""
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists, just not ours to signal
+    return True
+
+
+def run_pids(name: str) -> list[int]:
+    """Open `hop run` sessions for this account. Entries for dead ones are dropped."""
+    d = os.path.join(run_home(name), ".hop-pids")
+    try:
+        entries = os.listdir(d)
+    except OSError:
+        return []
+    alive = []
+    for e in entries:
+        if not e.isdigit():
+            continue
+        pid = int(e)
+        try:
+            with open(os.path.join(d, e)) as f:
+                started = f.read().strip()
+        except OSError:
+            continue
+        if (_proc_start(pid) == started) if started else _pid_alive(pid):
+            alive.append(pid)
+        else:
+            try:
+                os.remove(os.path.join(d, e))
+            except OSError:
+                pass
+    return sorted(alive)
+
+
+def _register_pid(name: str, pid: int):
+    d = os.path.join(run_home(name), ".hop-pids")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    with open(os.path.join(d, str(pid)), "w") as f:
+        f.write(_proc_start(pid))
+
+
+def _unregister_pid(name: str, pid: int):
+    try:
+        os.remove(os.path.join(run_home(name), ".hop-pids", str(pid)))
+    except OSError:
+        pass
+
+
+def run_block(name: str) -> dict | None:
+    """The login in an account's run home, if there is one."""
+    try:
+        with open(run_creds_path(name)) as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return None
+    block = doc.get(OAUTH_KEY) if isinstance(doc, dict) else None
+    return block if isinstance(block, dict) and block.get("accessToken") else None
+
+
+def _issued_later(a: dict | None, b: dict | None) -> bool:
+    """True if login block a was issued after b. Access tokens last a flat 8 hours
+    from issue, so a later expiry means a later token."""
+    return ((a or {}).get("expiresAt") or 0) > ((b or {}).get("expiresAt") or 0)
+
+
+def _write_run_creds(name: str, block: dict):
+    path = run_creds_path(name)
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+        if not isinstance(doc, dict):
+            doc = {}
+    except (OSError, ValueError):
+        doc = {}
+    doc[OAUTH_KEY] = block  # anything else in there (MCP logins) stays
+    write_json_secure(path, doc)
+
+
+def _link_shared(home: str):
+    names = list(SHARED_ENTRIES)
+    for extra in (env("CLAUDE_HOP_SHARE") or "").split(","):
+        extra = extra.strip()
+        if extra and os.sep not in extra and extra not in (".", "..") and extra not in NEVER_SHARED:
+            names.append(extra)
+    for entry in names:
+        src, dst = os.path.join(CLAUDE_DIR, entry), os.path.join(home, entry)
+        if os.path.islink(dst):
+            if os.readlink(dst) == src:
+                continue
+            os.remove(dst)
+        elif os.path.lexists(dst):
+            continue  # a real file or folder in the run home; not ours to replace
+        if os.path.lexists(src):
+            os.symlink(src, dst)
+
+
+def _copy_global_config(home: str):
+    """The global config, minus which account it was last signed in as.
+
+    Claude Code looks that up again at startup. Copied rather than linked: two
+    sessions on two accounts would keep overwriting each other's `oauthAccount`.
+    Changes made inside a run session (a new MCP server, a trust prompt) stay in
+    its home.
+    """
+    try:
+        with open(global_config_path()) as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return
+    if isinstance(doc, dict):
+        doc.pop("oauthAccount", None)
+        write_json_secure(os.path.join(home, ".claude.json"), doc)
+
+
+def prepare_run_home(name: str, profile_block: dict) -> str:
+    """Make <accounts>/.run/<name>/ ready for a session. Call with lock() held."""
+    home = run_home(name)
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    os.chmod(RUN_DIR, 0o700)
+    if os.stat(home).st_mode & 0o077:
+        os.chmod(home, 0o700)
+    if not run_pids(name):  # with a session open its login is the live one: hands off
+        have = run_block(name)
+        if not have:
+            _write_run_creds(name, profile_block)
+        elif have.get("accessToken") != profile_block.get("accessToken"):
+            if _issued_later(profile_block, have):  # logged in again since: that wins
+                _write_run_creds(name, profile_block)
+            else:  # the session rotated it: bring the profile up to date
+                save_profile(name, have, {})
+        _copy_global_config(home)
+    _link_shared(home)
+    return home
+
+
+def capture_run_login(name: str) -> bool:
+    """Save the login in the run home back to the profile. True if that changed it.
+
+    A `/login` inside the session could have signed in as somebody else. A
+    rotation keeps the same 30-day window, a new login starts a fresh one, so a
+    window that jumped is checked against the API before it is filed under this
+    name.
+    """
+    new = run_block(name)
+    if not new:
+        return False
+    prof = peek_profile(name)
+    old = prof.get(OAUTH_KEY) or {}
+    if new.get("accessToken") == old.get("accessToken"):
+        return False
+    window_new = new.get("refreshTokenExpiresAt") or 0
+    window_old = old.get("refreshTokenExpiresAt") or 0
+    if window_new > window_old + 3600_000 and not OFFLINE:
+        ident = identity(new)
+        was, now_ = prof.get("accountUuid"), ident.get("accountUuid")
+        if was and now_ and was != now_:
+            other = stash_live(new)
+            if old:
+                _write_run_creds(name, old)  # the home goes back to being this account's
+            info(
+                f"{YELLOW}note:{OFF} you signed in as {ident.get('email') or 'another account'} inside "
+                f"the '{name}' session. Saved that login as '{other}'; '{name}' is unchanged."
+            )
+            return True
+    save_profile(name, new, {})
+    return True
+
+
+def remove_run_home(name: str):
+    """Delete a run home. Symlinks are unlinked, never followed: they point at
+    your real settings and projects."""
+    home = run_home(name)
+    if not os.path.isdir(home):
+        return
+    for root, dirs, files in os.walk(home, topdown=False, followlinks=False):
+        for f in files:
+            os.remove(os.path.join(root, f))
+        for d in dirs:
+            p = os.path.join(root, d)
+            if os.path.islink(p):
+                os.remove(p)
+            else:
+                os.rmdir(p)
+    os.rmdir(home)
+
+
+def cmd_run(name=None, rest=None, **_):
+    """Run `claude` as one account in this terminal only."""
+    rest = list(rest or [])
+    if not name or name.startswith("-"):
+        die(f"usage: {PROG} run <name> [claude arguments]", USAGE_EXIT)
+    if STORE.name != "file":
+        die(
+            f"`{PROG} run` needs the credential file. This machine keeps Claude Code's login in the "
+            f"{STORE.name}, and a second login under another config dir is not handled there yet."
+        )
+    claude = shutil.which("claude")
+    if not claude:
+        die("`claude` is not on your PATH.")
+    for var in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+        if os.environ.get(var):
+            info(f"{YELLOW}warning:{OFF} ${var} is set in this shell and overrides the saved login.")
+
+    with lock():
+        target = load_profile(name)
+        blk = target.get(OAUTH_KEY)
+        if not blk:
+            die(f"'{name}' has no saved credentials. Re-save it with `{PROG} add {name}`.")
+        if active_name() == name and live_oauth():
+            info(f"{DIM}'{name}' is the live login, so this is plain `claude`. "
+                 f"A later hop moves it, as it does every open session.{OFF}")
+            os.execv(claude, [claude, *rest])
+        home = prepare_run_home(name, blk)
+        warn = refresh_warning(run_block(name) or blk)
+        if warn:
+            info(f"{YELLOW}note:{OFF} {warn}")
+        info(f"{DIM}claude as {name} ({target.get('email') or 'email unknown'}), config home {home}{OFF}")
+        old_signals = _guard_child_signals()
+        try:
+            proc = subprocess.Popen([claude, *rest], env={**os.environ, "CLAUDE_CONFIG_DIR": home})
+        except OSError as e:
+            _restore_signals(old_signals)
+            die(f"could not start claude: {e}")
+        _register_pid(name, proc.pid)
+
+    code = 1
+    try:
+        try:
+            code = proc.wait()
+        except _TerminalGone:
+            try:
+                code = proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                code = 1
+    finally:
+        try:
+            _unregister_pid(name, proc.pid)
+            with lock():
+                if capture_run_login(name):
+                    info(f"{DIM}saved the renewed login for {name}{OFF}")
+        finally:
+            _restore_signals(old_signals)
+    sys.exit(128 - code if code < 0 else code)
+
+
 # ------------------------------------------------------------------- commands
 
 
@@ -1568,6 +1878,15 @@ def cmd_renew(name=None, yes=False, **_):
     live = live_oauth()
     failed = 0
     for n in names:
+        pids = run_pids(n)
+        if pids and not yes:
+            print(
+                f"  {DIM}{n}{OFF}  skipped - open in a run session, "
+                f"pid {', '.join(map(str, pids))} (--yes overrides)"
+            )
+            continue
+        if not pids:
+            capture_run_login(n)  # a session that has ended may hold the newer login
         blk = live if (n == cur and live) else load_profile(n).get(OAUTH_KEY, {})
         # Renewing rotates the refresh token, and the old one dies with the call.
         # A session that is already running holds the old one, so rotating the
@@ -1657,6 +1976,14 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
         else:
             print(f"already on {GREEN}{name}{OFF} ({target.get('email') or '?'})")
         return
+
+    pids = run_pids(name)
+    if pids and not yes:
+        die(
+            f"'{name}' is open in a `{PROG} run` session (pid {', '.join(map(str, pids))}). A second "
+            f"copy of its login would rotate on its own and one of the two would be signed out. "
+            f"Close that session first, or pass --yes."
+        )
 
     # Hand over a credential that is usable as it lands. Claude Code would renew
     # an aged-out access token itself on the next start, but only if nothing
@@ -1900,6 +2227,9 @@ def cmd_rm(name=None, yes=False, **_):
         print(f"deleted {name}")
         return
     load_profile(name)  # existence check
+    pids = run_pids(name)
+    if pids:
+        die(f"'{name}' is open in a `{PROG} run` session (pid {', '.join(map(str, pids))}). Close it first.")
     if name == active_name():
         info(
             f"{YELLOW}note:{OFF} '{name}' is the account you are logged in as right now; "
@@ -1910,6 +2240,7 @@ def cmd_rm(name=None, yes=False, **_):
     for f in (profile_path(name), profile_path(name) + ".bak"):
         if os.path.exists(f):
             os.remove(f)
+    remove_run_home(name)  # it holds a copy of the login
     if read_ptr() == name:
         os.remove(ACTIVE_PTR)
     print(f"deleted {name}")
@@ -1922,12 +2253,17 @@ def cmd_rename(name=None, new=None, **_):
     data = load_profile(name)
     if os.path.exists(profile_path(new)):
         die(f"'{new}' already exists")
+    pids = run_pids(name)
+    if pids:
+        die(f"'{name}' is open in a `{PROG} run` session (pid {', '.join(map(str, pids))}). Close it first.")
     was_active = read_ptr() == name or active_name() == name
     data["name"] = new
     write_json_secure(profile_path(new), data)
     for f in (profile_path(name), profile_path(name) + ".bak"):
         if os.path.exists(f):
             os.remove(f)
+    if os.path.isdir(run_home(name)):
+        os.rename(run_home(name), run_home(new))
     if was_active:
         set_active_ptr(new)
     print(f"renamed {name} -> {new}")
@@ -1980,14 +2316,12 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
         # one - so say it while it is still cheap to fix.
         saved = profiles[n].get(OAUTH_KEY, {})
         if blocks[n] is not saved and saved.get("accessToken") != blocks[n].get("accessToken"):
+            where = "live login" if n == active_name() else "login in its run session"
             if fix:
                 save_profile(n, blocks[n], {})
-                note("warn", f"'{n}' saved copy was behind the live login", "synced")
+                note("warn", f"'{n}' saved copy was behind the {where}", "synced")
             else:
-                note(
-                    "warn",
-                    f"'{n}' saved copy is behind the live login; `{PROG} sync` (or --fix)",
-                )
+                note("warn", f"'{n}' saved copy is behind the {where}; --fix saves it")
 
     stale = []
     if os.path.isdir(ACCOUNTS):
@@ -2163,7 +2497,7 @@ def cmd_shell_init(**_):
                 COMPREPLY=($(compgen -W "{verbs} $names" -- "$cur"))
               else
                 case "$prev" in
-                  use|switch|rm|remove|delete|rename|mv|save|add|new|login|renew|refresh|usage)
+                  use|switch|rm|remove|delete|rename|mv|save|add|new|login|renew|refresh|usage|run)
                     COMPREPLY=($(compgen -W "$names" -- "$cur")) ;;
                   *)
                     COMPREPLY=($(compgen -W "{flags}" -- "$cur")) ;;
@@ -2188,6 +2522,7 @@ COMMANDS = {
     "rm": cmd_rm, "remove": cmd_rm, "delete": cmd_rm,
     "rename": cmd_rename, "mv": cmd_rename,
     "usage": cmd_usage,
+    "run": cmd_run,
     "provider": cmd_provider, "providers": cmd_provider,
     "off": cmd_off,
     "doctor": cmd_doctor, "check": cmd_doctor,
@@ -2211,6 +2546,14 @@ FLAGS = {
 
 
 def main(argv: list[str]):
+    # `run` hands everything after the account name to claude, flags included.
+    if argv[:1] == ["run"]:
+        rest = argv[2:]
+        if rest[:1] == ["--"]:
+            rest = rest[1:]
+        cmd_run(name=argv[1] if len(argv) > 1 else None, rest=rest)
+        return
+
     flags = {"yes": False, "verify": False, "long_": False, "no_sync": False,
              "as_json": False, "fix": False, "no_color": False}
     args: list[str] = []

@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>Hop Claude Code between several Claude accounts without logging in again.</b><br>
-  Personal Max account in the morning, work Team seat in the afternoon.
+  Personal Max account in one terminal, work Team seat in another.
   <i>Two separate usage pools, one machine, no browser round-trip.</i>
 </p>
 
@@ -44,7 +44,8 @@ Claude Code reads its login again before every message, so a hop reaches the
 `claude` sessions you already have open too, on their next message. That's the
 whole tool.
 
-If you'd rather not read a menu, `hop home` goes straight there.
+If you'd rather not read a menu, `hop home` goes straight there. To use two
+accounts at the same time, see [One account per terminal](#one-account-per-terminal).
 
 ## Install
 
@@ -143,6 +144,38 @@ output with no secrets in it, for scripts and statuslines. `hop active` prints
 just the active name with no network call. `hop use <name>` is the long spelling
 of `hop <name>`, and `hop sync` writes the live login back to its own file.
 
+## One account per terminal
+
+```bash
+hop run work              # claude as the work account, in this terminal only
+hop run home -- --resume  # everything after the name goes to claude
+```
+
+`hop run <name>` starts `claude` as that account and leaves the live login
+alone. Your other terminals keep their account, and a `hop` somewhere else does
+not move this one.
+
+Each account gets a config home of its own, `accounts/.run/<name>/`, and
+`claude` is pointed at it with `CLAUDE_CONFIG_DIR`. The home holds the account's
+login and a copy of your global config without the signed-in account. Your
+settings, `CLAUDE.md`, skills, agents, commands, hooks, plugins, output styles,
+keybindings, plans, prompt history and `projects` are links to the real ones, so
+a run session looks like your normal one, and conversations and memory are shared
+across accounts. `CLAUDE_HOP_SHARE=notes.md,other` links more names. Things you
+change inside a session in the copied config (a new MCP server, a trust prompt)
+stay in its home, and MCP logins belong to the account.
+
+The login in that home is the one Claude Code renews, so `hop run` saves it back
+to the profile when the session ends, and `doctor --fix` does the same after a
+crash. While a session is open, `use`, `renew`, `rm` and `rename` leave its
+account alone, because two copies of one login would rotate separately and one
+would be signed out. Running the live account is plain `claude`, with no second
+home. If you `/login` as someone else inside a session, that login is saved under
+its own name and the account you ran is unchanged.
+
+Linux for now. On macOS Claude Code keeps its login in the keychain, and a second
+login under another config dir is not handled yet.
+
 ## Usage
 
 ```
@@ -229,9 +262,8 @@ version may change it.
   under way changes account on its next message, moves to the new account's
   usage, and starts a new prompt cache. `claudehop` lists the sessions it finds
   when you hop. It also means one `hop` cannot give two terminals two accounts at
-  once; for that, run one of them under its own `CLAUDE_CONFIG_DIR`. On macOS
-  claude-swap's documentation says the keychain read is cached for about half a
-  minute first; that is not tested here.
+  once; `hop run` can. On macOS claude-swap's documentation says the keychain
+  read is cached for about half a minute first; that is not tested here.
 - `/login` opens your default browser, which is already signed in as somebody.
   Paste the URL into an incognito window to authenticate as a different account.
 - `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` in the environment override
@@ -319,9 +351,9 @@ a larger size:
 - [claude-acc](https://github.com/Nemo-Illusionist/claude-code-account-switcher)
   (Rust) ties an account to a directory, so `cd` changes it.
 
-claudehop has no per-terminal mode yet. Until it does, run a second account under
-its own `CLAUDE_CONFIG_DIR`, or use one of these. The feature lists are from their
-READMEs on 2026-10-06.
+`hop run` covers the per-terminal case. claudehop has no automatic switching near
+a rate limit, no terminal interface and no per-directory accounts. The feature
+lists above are from their READMEs on 2026-10-06.
 
 ## Security
 
@@ -341,7 +373,7 @@ shell/claudehop.sh           PATH, tab-completion, back-compat aliases
 extras/statusline-snippet.sh show the active account in the Claude Code statusline
 install.sh                   symlink/copy into ~/.claude, wire up the rc file
 pyproject.toml               packaging: one module, no dependencies, two commands
-test/test-switch.sh          about 190 checks against a throwaway config dir, no network
+test/test-switch.sh          about 240 checks against a throwaway config dir, no network
 assets/                      logo, icon, cover and social preview (svg sources + png)
 ```
 

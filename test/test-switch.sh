@@ -8,7 +8,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOP="$ROOT/claudehop.py"
 TMP="$(mktemp -d -t claudehop-test-XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" "$TMP.lock"' EXIT
 
 export CLAUDE_CONFIG_DIR="$TMP"
 export CLAUDE_ACCOUNTS_DIR="$TMP/accounts"
@@ -949,6 +949,197 @@ seed; rm -f "$UC"
 out="$(USAGE_OFFLINE=1 usage_run "$two_ok")"
 is "offline mode makes no request" "$(calls_of "$out")" "0"
 printf '%s' "$out" | grep -q "offline" && ok "...and says so" || bad "...and says so" "$out"
+seed
+
+# --- 22. run: one terminal on its own account -----------------------------------
+# A hop moves every open `claude`, so two accounts at once need a config home per
+# account. The stand-in `claude` records what a session sees, can renew its login
+# the way Claude Code does, and exits as told. The real Claude Code was checked
+# separately against a fake endpoint: three sessions, three logins, at once.
+RB="$TMP/runbin"; OUT="$TMP/stub-out"; mkdir -p "$RB" "$OUT"
+cat > "$RB/claude" <<'STUB'
+#!/usr/bin/env python3
+import json, os, sys, time
+out = os.environ["STUB_OUT"]
+home = os.environ.get("CLAUDE_CONFIG_DIR", "none")
+open(out + "/config_dir", "w").write(home)
+open(out + "/args", "w").write("|".join(sys.argv[1:]))
+creds = os.path.join(home, ".credentials.json")
+try:
+    token = json.load(open(creds))["claudeAiOauth"]["accessToken"]
+except Exception:
+    token = "none"
+open(out + "/token_seen", "w").write(token)
+if os.environ.get("STUB_ROTATE"):
+    doc = json.load(open(creds))
+    doc["claudeAiOauth"].update(accessToken=os.environ["STUB_ROTATE"],
+                                refreshToken="r-" + os.environ["STUB_ROTATE"], expiresAt=100000000000000)
+    json.dump(doc, open(creds, "w"))
+time.sleep(float(os.environ.get("STUB_SLEEP", "0")))
+sys.exit(int(os.environ.get("STUB_EXIT", "0")))
+STUB
+chmod +x "$RB/claude"
+runhop() { env PATH="$RB:$PATH" STUB_OUT="$OUT" "$@"; }   # runhop [VAR=x ...] "$HOP" run ...
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+RH="$CLAUDE_ACCOUNTS_DIR/.run"
+printf '# shared\n' > "$TMP/CLAUDE.md"; echo '{}' > "$TMP/settings.json"
+mkdir -p "$TMP/projects" "$TMP/skills/s"; echo sentinel > "$TMP/projects/sentinel.jsonl"; echo skill > "$TMP/skills/s/SKILL.md"
+echo '{"oauthAccount": {"emailAddress": "alpha@x.com"}, "mcpServers": {"demo": {"command": "true"}}, "userID": "u1"}' > "$TMP/.claude.json"
+set_run_login() {  # set_run_login <name> <token> <expiresAt>: what a session leaves in its home
+  CH_N="$1" CH_T="$2" CH_E="$3" python3 -c "
+import json, os
+p = os.environ['CLAUDE_ACCOUNTS_DIR'] + '/.run/' + os.environ['CH_N'] + '/.credentials.json'
+d = json.load(open(p)); d['claudeAiOauth'].update(accessToken=os.environ['CH_T'], expiresAt=int(os.environ['CH_E'])); json.dump(d, open(p, 'w'))"
+}
+
+seed
+runhop "$HOP" run beta -p "hi there" --model x >/dev/null 2>&1
+is "run starts claude under the account's own config dir"  "$(cat "$OUT/config_dir")" "$RH/beta"
+is "...with every argument passed through, flags included" "$(cat "$OUT/args")" "-p|hi there|--model|x"
+is "...and the account's login in that home"               "$(cat "$OUT/token_seen")" "tok-B"
+is "the live login is untouched"                           "$(live_token)" "tok-A"
+is "...and so is the active pointer"                       "$(cat "$CLAUDE_ACCOUNTS_DIR/active")" "alpha"
+is "the run home is private"   "$(mode_of "$RH/beta")" "700"
+is "...and so is its login"    "$(mode_of "$RH/beta/.credentials.json")" "600"
+for e in CLAUDE.md settings.json projects skills; do
+  [ "$(readlink "$RH/beta/$e")" = "$TMP/$e" ] && ok "$e is shared with your real config" \
+    || bad "$e is shared with your real config" "$(readlink "$RH/beta/$e" || echo 'not a link')"
+done
+{ [ -f "$RH/beta/.credentials.json" ] && [ ! -L "$RH/beta/.credentials.json" ]; } \
+  && ok "the login itself is never a link into your own" || bad "the login itself is never a link into your own" "linked"
+python3 -c "
+import json, os
+d = json.load(open(os.environ['CLAUDE_ACCOUNTS_DIR'] + '/.run/beta/.claude.json'))
+assert 'oauthAccount' not in d and d['mcpServers']['demo'] and d['userID'] == 'u1'" 2>/dev/null \
+  && ok "the global config is copied without the signed-in account" || bad "the global config is copied without the signed-in account" "$(cat "$RH/beta/.claude.json")"
+runhop "$HOP" run beta -- --resume >/dev/null 2>&1
+is "-- ends our options and starts claude's" "$(cat "$OUT/args")" "--resume"
+runhop STUB_EXIT=7 "$HOP" run beta >/dev/null 2>&1; is "the exit code is claude's" "$?" "7"
+runhop "$HOP" run >/dev/null 2>&1; is "run without an account is a usage error" "$?" "2"
+runhop "$HOP" run nosuch >/dev/null 2>&1 && bad "run on an unknown account fails" "exit 0" || ok "run on an unknown account fails"
+
+# a login the session renewed is saved back, and the next session starts from it
+seed
+runhop STUB_ROTATE=tok-B2 "$HOP" run beta >/dev/null 2>&1
+is "a login the session renewed is saved back to the profile" "$(saved_token beta)" "tok-B2"
+is "...with the rest of the profile intact"                    "$(jget "$CLAUDE_ACCOUNTS_DIR/beta.json" email)" "beta@x.com"
+is "...and the live login still untouched"                     "$(live_token)" "tok-A"
+runhop "$HOP" run beta >/dev/null 2>&1
+is "the next session starts from the renewed login" "$(cat "$OUT/token_seen")" "tok-B2"
+
+# logging in again outside the session beats what the session holds
+python3 -c "
+import json, os
+p = os.environ['CLAUDE_ACCOUNTS_DIR'] + '/beta.json'; d = json.load(open(p))
+d['claudeAiOauth'].update(accessToken='tok-B3', expiresAt=100000000000009); json.dump(d, open(p, 'w'))"
+runhop "$HOP" run beta >/dev/null 2>&1
+is "a newer login in the profile replaces the session's" "$(cat "$OUT/token_seen")" "tok-B3"
+
+# a session that was killed before it could save: the home holds the newest login
+set_run_login beta tok-B4 100000000000020
+runhop "$HOP" run beta >/dev/null 2>&1
+is "a login left in the home by a killed session is kept" "$(cat "$OUT/token_seen")" "tok-B4"
+is "...and the profile catches up"                        "$(saved_token beta)" "tok-B4"
+
+# the live account is not given a second home
+seed; rm -rf "$RH"
+runhop "$HOP" run alpha -p x >/dev/null 2>&1
+is "run on the live account is plain claude" "$(cat "$OUT/config_dir")" "$TMP"
+is "...with the arguments passed through"    "$(cat "$OUT/args")" "-p|x"
+[ ! -e "$RH/alpha" ] && ok "...and it makes no second home" || bad "...and it makes no second home" "$(ls "$RH")"
+
+# while a session is open, its account is left alone
+seed
+runhop STUB_SLEEP=4 "$HOP" run beta >/dev/null 2>&1 &
+RUNPID=$!
+for _ in $(seq 80); do [ -n "$(ls "$RH/beta/.hop-pids" 2>/dev/null)" ] && break; sleep 0.1; done
+out="$("$HOP" use beta 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "run\` session"; } \
+  && ok "use refuses an account that is open in a run session" || bad "use refuses an account that is open in a run session" "rc=$rc $out"
+is "...and changes nothing" "$(live_token)" "tok-A"
+"$HOP" rm beta -y >/dev/null 2>&1 && bad "rm refuses it too" "deleted" || ok "rm refuses it too"
+"$HOP" rename beta zeta >/dev/null 2>&1 && bad "rename refuses it too" "renamed" || ok "rename refuses it too"
+wait "$RUNPID"
+[ -z "$(ls "$RH/beta/.hop-pids" 2>/dev/null)" ] && ok "a session takes itself off the list when it ends" \
+  || bad "a session takes itself off the list when it ends" "$(ls "$RH/beta/.hop-pids")"
+"$HOP" rename beta zeta >/dev/null 2>&1
+{ [ -d "$RH/zeta" ] && [ ! -e "$RH/beta" ]; } && ok "rename moves the run home with the account" || bad "rename moves the run home with the account" "$(ls -A "$RH")"
+"$HOP" rm zeta -y >/dev/null 2>&1
+[ ! -e "$RH/zeta" ] && ok "rm removes the run home and its copy of the login" || bad "rm removes the run home and its copy of the login" "still there"
+{ [ -f "$TMP/projects/sentinel.jsonl" ] && [ -f "$TMP/CLAUDE.md" ] && [ -f "$TMP/skills/s/SKILL.md" ]; } \
+  && ok "...and never follows a link into your own files" || bad "...and never follows a link into your own files" "something is gone"
+
+# doctor sees a newer login in a run home, and --fix saves it
+seed
+runhop "$HOP" run beta >/dev/null 2>&1
+set_run_login beta tok-B5 100000000000030
+"$HOP" doctor 2>&1 | grep -q "behind the login in its run session" \
+  && ok "doctor reports a run home that is ahead of its profile" || bad "doctor reports a run home that is ahead of its profile" "$("$HOP" doctor 2>&1)"
+"$HOP" doctor --fix >/dev/null 2>&1
+is "...and --fix saves it" "$(saved_token beta)" "tok-B5"
+
+# extra names can be shared; credentials and identity never can
+seed
+echo notes > "$TMP/notes.md"
+runhop CLAUDE_HOP_SHARE="notes.md,.credentials.json,../x,accounts" "$HOP" run beta >/dev/null 2>&1
+[ "$(readlink "$RH/beta/notes.md")" = "$TMP/notes.md" ] && ok "CLAUDE_HOP_SHARE adds a name" || bad "CLAUDE_HOP_SHARE adds a name" "$(ls -A "$RH/beta")"
+{ [ ! -L "$RH/beta/.credentials.json" ] && [ ! -e "$RH/beta/x" ] && [ ! -L "$RH/beta/accounts" ]; } \
+  && ok "...but never a login, the accounts folder, or a path" || bad "...but never a login, the accounts folder, or a path" "$(ls -lA "$RH/beta")"
+
+# macOS keeps the login in the keychain; a second login under another config dir is not handled
+seed
+out="$(kc run beta 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "credential file"; } \
+  && ok "run says so on the keychain backend" || bad "run says so on the keychain backend" "rc=$rc $out"
+
+# the two judgement calls, driven in-process: a renewal that must not happen, and a login as somebody else
+run_inproc() {  # run_inproc <python body>
+  HOP="$HOP" BODY="$1" python3 - <<'PY' 2>&1
+import importlib.machinery, importlib.util, json, os
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+exec(os.environ["BODY"], {"ca": ca, "os": os, "json": json})
+PY
+}
+seed
+out="$(run_inproc '
+ca.OFFLINE = False
+calls = []
+ca.refresh_block = lambda blk, timeout=0: (calls.append(1), (None, {}, "stub"))[1]
+ca.active_name = lambda check_api=False: "alpha"
+ca._register_pid("beta", os.getpid())
+ca.cmd_renew(name="beta")
+print("calls while open:", len(calls))
+ca._unregister_pid("beta", os.getpid())
+try:
+    ca.cmd_renew(name="beta")
+except SystemExit:
+    pass
+print("calls once closed:", len(calls))
+')"
+printf '%s' "$out" | grep -q "skipped - open in a run session" && printf '%s' "$out" | grep -q "calls while open: 0" \
+  && ok "renew leaves an account alone while a session has it open" || bad "renew leaves an account alone while a session has it open" "$out"
+printf '%s' "$out" | grep -q "calls once closed: 1" && ok "...and renews it once the session is closed" || bad "...and renews it once the session is closed" "$out"
+
+seed
+runhop "$HOP" run beta >/dev/null 2>&1
+out="$(run_inproc '
+ca.OFFLINE = False
+p = ca.profile_path("beta"); d = json.load(open(p))
+d["accountUuid"] = "u-beta"; d["claudeAiOauth"]["refreshTokenExpiresAt"] = 1000
+json.dump(d, open(p, "w"))
+ca._write_run_creds("beta", dict(d["claudeAiOauth"], accessToken="tok-STRANGER", refreshTokenExpiresAt=1000 + 20 * 86400 * 1000))
+ca.identity = lambda blk: {"accountUuid": "u-other", "email": "other@x.com", "plan": "max", "tokenState": "ok"}
+print("changed:", ca.capture_run_login("beta"))
+print("beta now:", ca.peek_profile("beta")["claudeAiOauth"]["accessToken"])
+print("home now:", ca.run_block("beta")["accessToken"])
+print("other saved:", ca.peek_profile("other").get("claudeAiOauth", {}).get("accessToken"))
+' 2>&1)"
+{ printf '%s' "$out" | grep -q "beta now: tok-B$"; } \
+  && ok "a /login as somebody else inside a session does not overwrite the account" || bad "a /login as somebody else inside a session does not overwrite the account" "$out"
+printf '%s' "$out" | grep -q "other saved: tok-STRANGER" && ok "...it is saved under its own name instead" || bad "...it is saved under its own name instead" "$out"
+printf '%s' "$out" | grep -q "home now: tok-B$" && ok "...and the home goes back to the account's login" || bad "...and the home goes back to the account's login" "$out"
 seed
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
