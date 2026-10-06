@@ -7,8 +7,8 @@ To switch accounts, run `hop` and pick one. That is the whole tool.
   hop <name>           hop straight to that one
   hop add <name>       log in as a new account and save it
 
-A hop takes effect for the next `claude` you start. Sessions already running
-keep the account they began with.
+Claude Code reads its login again before each message, so a hop reaches the
+sessions you already have open as well, on their next message.
 
 Not everything is a login. Amazon Bedrock, Vertex or a gateway run Claude Code
 from environment variables, so a provider is a command you register once and
@@ -985,10 +985,9 @@ def warn_running():
     pids = running_claude_pids()
     if pids:
         info(
-            f"{YELLOW}note:{OFF} {len(pids)} claude session(s) still running "
-            f"(pid {', '.join(map(str, pids))}). They keep the old account until you restart "
-            f"them, and one of them may rewrite the credential store when its token refreshes. "
-            f"Quit them for a clean switch."
+            f"{YELLOW}note:{OFF} {len(pids)} claude session(s) open "
+            f"(pid {', '.join(map(str, pids))}). Each one follows this on its next message, so a "
+            f"conversation under way moves to the new account's usage and starts a new prompt cache."
         )
 
 
@@ -1690,7 +1689,7 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
     if warn:
         info(f"{YELLOW}note:{OFF} {warn}")
     warn_running()
-    print(f"{DIM}open a new terminal and run `claude` - it will start as this account.{OFF}")
+    print(f"{DIM}new `claude` sessions start as this account; open ones follow on their next message.{OFF}")
 
 
 def cmd_provider_on(name=None, **_):

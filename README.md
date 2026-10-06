@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>Hop Claude Code between several Claude accounts without logging in again.</b><br>
-  Personal Max account in one terminal, work Team seat in another —
+  Personal Max account in the morning, work Team seat in the afternoon —
   <i>two separate usage pools, one machine, no browser round-trip.</i>
 </p>
 
@@ -40,11 +40,11 @@ hop to which? [1-2, Enter to stay] 1
 switched to home (me@gmail.com, max)
 ```
 
-Then start a new `claude`. That's it — that's the whole tool.
+Claude Code reads its login again before every message, so a hop reaches the
+`claude` sessions you already have open too, on their next message. That's it —
+that's the whole tool.
 
-If you'd rather not read a menu, `hop home` goes straight there. Sessions you
-already have open keep the account they started with; only new ones pick up the
-change.
+If you'd rather not read a menu, `hop home` goes straight there.
 
 ## Install
 
@@ -222,10 +222,16 @@ version may change it.
 
 ## Gotchas
 
-- Switching affects **new** `claude` processes. Sessions already running keep the
-  account they started with, and will rewrite the credential store when their
-  token refreshes — which can silently undo a switch. `claudehop` prints the
-  PIDs it finds; quit them for a clean switch.
+- A hop moves **every** running `claude`, not only new ones. Claude Code reads
+  the credential store again before each message: with a fake endpoint, a
+  session sent its next message with the new login about two seconds after the
+  swap (Linux, Claude Code 2.1.284, headless mode). So a conversation already
+  under way changes account on its next message, moves to the new account's
+  usage, and starts a new prompt cache. `claudehop` lists the sessions it finds
+  when you hop. It also means one `hop` cannot give two terminals two accounts at
+  once; for that, run one of them under its own `CLAUDE_CONFIG_DIR`. On macOS
+  claude-swap's documentation says the keychain read is cached for about half a
+  minute first; that is not tested here.
 - `/login` opens your default browser, which is already signed in as somebody.
   Paste the URL into an incognito window to authenticate as a different account.
 - `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` in the environment override
