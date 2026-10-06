@@ -29,7 +29,7 @@ Thanks for looking. This is a small tool and it intends to stay small.
 git clone https://github.com/psychofict/claudehop.git
 cd claudehop
 ./install.sh              # symlinks, so your edits are live immediately
-./test/test-switch.sh     # about 190 checks, under fifteen seconds
+./test/test-switch.sh     # about 240 checks, under twenty seconds
 ```
 
 Before opening a pull request:
@@ -46,10 +46,8 @@ pull request.
 
 ## Things worth doing
 
-- `hop run <name>`: one terminal on its own account, under its own
-  `CLAUDE_CONFIG_DIR`. A global hop moves every open session, so this is the
-  only way to use two accounts at once. The hard part is the token: a session's
-  copy rotates on its own, so it has to be captured back when the session ends.
+- `hop run` on macOS. Claude Code keeps its login in the keychain there, and the
+  item for a second config dir needs working out against a real Mac.
 - Check whether an open interactive session (not headless mode) follows a hop,
   and how long macOS takes to notice. The README says what was measured and where.
 - Verification of the macOS keychain backend against a real Mac. It is written

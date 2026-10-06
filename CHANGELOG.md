@@ -3,6 +3,28 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`hop run <name> [claude arguments]`** starts `claude` as one account in the
+  terminal you are in and leaves the live login alone, so two terminals can be on
+  two accounts at once. A global hop cannot do that, because Claude Code reads
+  its login again before every message. Each account gets a config home of its
+  own in `accounts/.run/<name>/`, which `claude` is pointed at with
+  `CLAUDE_CONFIG_DIR`. It holds the account's login and a copy of the global
+  config without the signed-in account. Settings, `CLAUDE.md`, skills, agents,
+  commands, hooks, plugins, output styles, keybindings, plans, prompt history and
+  `projects` are links to the real ones, so a run session looks like your normal
+  one and conversations are shared across accounts (`CLAUDE_HOP_SHARE` adds more
+  names). The session's renewed login is saved back to the profile when it ends,
+  by `doctor --fix` after a crash, and at the next launch. `use`, `renew`, `rm`
+  and `rename` leave an account alone while a session has it open. Running the
+  live account is plain `claude`. A `/login` as another account inside a session
+  is saved under its own name. Linux only for now. Checked with Claude Code
+  2.1.284: three sessions at once sent three different logins, and the live
+  login and active pointer did not move.
+
 ## [1.6.0] — 2026-10-06
 
 ### Fixed

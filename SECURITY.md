@@ -24,6 +24,9 @@ What the tool does about that:
   Requests say they come from claudehop; the tool does not pose as Claude Code.
   `CLAUDE_HOP_OFFLINE=1` disables all of them.
 - `accounts/.usage-cache` holds usage percentages and reset times, never a token.
+- `hop run` keeps a copy of an account's login in `accounts/.run/<name>/` (folder `700`,
+  login `600`). `rm` deletes it, unlinking and never following the links that point at your
+  own settings and projects.
 - While it replaces the live login, the tool briefly holds the lock directories
   Claude Code uses for its own token refresh (`<config dir>/.oauth_refresh.lock`
   and `<config dir>.lock`). `doctor` reports one that a crashed run left behind.
