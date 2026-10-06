@@ -386,6 +386,23 @@ def check_name(name: str) -> str:
     return name
 
 
+def check_new_name(name: str) -> str:
+    """check_name, plus: a name we are about to create must not hide anything.
+
+    An account called `list` would be unreachable as `hop list` (the command
+    wins), and one that shares a provider's name would shadow the provider.
+    Names that already exist are left alone so old setups keep working.
+    """
+    check_name(name)
+    if os.path.exists(profile_path(name)):
+        return name
+    if name in COMMANDS:
+        die(f"'{name}' is a {PROG} command, so `{PROG} {name}` could never switch to it. Pick another name.")
+    if name in list_providers():
+        die(f"'{name}' is already a provider; pick another name.")
+    return name
+
+
 def list_profiles() -> list[str]:
     if not os.path.isdir(ACCOUNTS):
         return []
@@ -400,6 +417,21 @@ def load_profile(name: str) -> dict:
         known = ", ".join(list_profiles()) or "none saved yet"
         die(f"no saved account called '{name}'. Saved: {known}")
     return read_json(p)
+
+
+def peek_profile(name: str) -> dict:
+    """A profile for code that only looks: one that will not parse reads as empty.
+
+    load_profile stops the command with a clear error, which is right for a hop
+    but wrong for `doctor`, whose job is to say what is broken, and for the scan
+    that works out which saved account is live.
+    """
+    try:
+        with open(profile_path(name)) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def save_profile(name: str, block: dict, meta: dict | None = None):
@@ -514,7 +546,7 @@ def active_name(check_api: bool = False) -> str | None:
         return None
     tok = live.get("accessToken")
     for n in list_profiles():
-        if load_profile(n).get(OAUTH_KEY, {}).get("accessToken") == tok:
+        if (peek_profile(n).get(OAUTH_KEY) or {}).get("accessToken") == tok:
             return n
     ptr = read_ptr()
     if not ptr or ptr not in list_profiles():
@@ -1191,7 +1223,7 @@ def cmd_save(name=None, yes=False, **_):
         if not ident.get("email"):
             die("could not reach the API to name this account automatically - pass a name.")
         name = slug(ident["email"])
-    check_name(name)
+    check_new_name(name)
     if os.path.exists(profile_path(name)) and not confirm(f"overwrite saved account '{name}'?", yes):
         die("aborted")
     save_profile(name, live, {k: v for k, v in ident.items() if k != "tokenState"})
@@ -1301,6 +1333,22 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
             print(f"already on {GREEN}{name}{OFF} ({target.get('email') or '?'})")
         return
 
+    # The live token no longer equals the saved one once Claude Code has rotated
+    # it, but that does not make this a different account. The live block is the
+    # newer copy of the very profile we were asked for: keep it, and swap nothing.
+    # Loading the saved block and putting it back would replace the rotated token
+    # with one whose refresh token is already spent.
+    if live and active_name(check_api=True) == name:
+        if not no_sync:
+            save_profile(name, live, {})
+        set_active_ptr(name)
+        left = clear_provider_ptr()
+        if left:
+            print(f"left {left}; new sessions start as {GREEN}{name}{OFF} ({target.get('email') or '?'})")
+        else:
+            print(f"already on {GREEN}{name}{OFF} ({target.get('email') or '?'})")
+        return
+
     # Hand over a credential that is usable as it lands. Claude Code would renew
     # an aged-out access token itself on the next start, but only if nothing
     # rewrites the store first - and until it does, `whoami` and the statusline
@@ -1394,7 +1442,7 @@ def cmd_off(**_):
 def cmd_add(name=None, yes=False, **_):
     if not name:
         die(f"usage: {PROG} add <name>", USAGE_EXIT)
-    check_name(name)
+    check_new_name(name)
     target = profile_path(name)
     # Kept in memory so a replace that turns out to be the wrong account can be
     # undone without leaving a .bak behind for `doctor` to complain about.
@@ -1555,7 +1603,7 @@ def cmd_rm(name=None, yes=False, **_):
 def cmd_rename(name=None, new=None, **_):
     if not name or not new:
         die(f"usage: {PROG} rename <old> <new>", USAGE_EXIT)
-    check_name(new)
+    check_new_name(new)
     data = load_profile(name)
     if os.path.exists(profile_path(new)):
         die(f"'{new}' already exists")
@@ -1578,7 +1626,7 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
 
     live = live_oauth()
     names = list_profiles()
-    profiles = {n: read_json(profile_path(n)) for n in names}
+    profiles = {n: peek_profile(n) for n in names}
     blocks = effective_blocks(profiles, active_name(), live)
     plan = relogin_plan(blocks)
 
@@ -1604,6 +1652,9 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
                 note("warn", f"{p} was {mode:o}", "chmod 600")
             else:
                 note("error", f"{p} is mode {mode:o}; it should be 600")
+        if not profiles[n]:
+            note("error", f"{p} is empty or not valid JSON; delete it and run `{PROG} add {n}`")
+            continue
         if not profiles[n].get(OAUTH_KEY, {}).get("accessToken"):
             note("error", f"'{n}' has no saved credentials; re-add it")
         warn = refresh_warning(blocks[n])
@@ -1666,6 +1717,8 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
 
     if verify and names:
         for n, ident in identify_many(blocks).items():
+            if not profiles[n]:
+                continue  # already reported as unreadable above
             state = token_state(blocks[n], ident)
             if state in ("ok", "not checked", "stale (renews)", None):
                 continue

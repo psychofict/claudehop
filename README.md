@@ -85,6 +85,10 @@ haven't, because a session left running can write its own token back into the
 credential store mid-login and you'd end up with the wrong account saved under
 that name.
 
+Don't `/logout` first. `add` clears the local login itself, and a `/logout` may
+also revoke the refresh token of the account you are leaving on Anthropic's side
+(claude-swap's documentation reports this; I have not tested it).
+
 `add` then starts `claude` with no login so you can `/login`, and saves whatever
 that produces when you exit with `/exit`. **Paste the login URL into a private
 browser window.** Your normal browser is already signed in as one of your other
@@ -273,7 +277,7 @@ shell/claudehop.sh           PATH, tab-completion, back-compat aliases
 extras/statusline-snippet.sh show the active account in the Claude Code statusline
 install.sh                   symlink/copy into ~/.claude, wire up the rc file
 pyproject.toml               packaging: one module, no dependencies, two commands
-test/test-switch.sh          99 checks against a throwaway config dir, no network
+test/test-switch.sh          about 150 checks against a throwaway config dir, no network
 assets/                      logo, icon, cover and social preview (svg sources + png)
 ```
 
