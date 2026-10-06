@@ -68,9 +68,11 @@ CLAUDE_HOP_OFFLINE=1 to never call the API.
 from __future__ import annotations
 
 import binascii
+import contextlib
 import getpass
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -358,6 +360,99 @@ class _Lock:
 
 def lock():
     return _Lock(LOCK_PATH)
+
+
+# ---------------------------------------------------- Claude Code's refresh lock
+#
+# The lock above only keeps two `claudehop` runs apart. Claude Code has its own:
+# while it refreshes a token it holds two directories as mutexes (npm's
+# proper-lockfile), takes the credential store's contents, calls the token
+# endpoint, and writes the result back. A switch that lands inside that window
+# is overwritten by the old account's refreshed token, and the profile we just
+# saved holds a refresh token the server has already retired.
+#
+# Checked against Claude Code 2.1.284 by tracing it in a sandbox with the
+# network cut off: it takes <config>/.oauth_refresh.lock, then <config>.lock
+# (~/.claude.lock by default); if the second is held it releases the first and
+# retries about every 2s; it never removes a lock younger than 60s, and it
+# waits (six mkdir attempts, then gives up for now) when another tool holds
+# either one. So holding both, in its order, while we read and overwrite the
+# store keeps its refresh out of the way. Keep the held section to file
+# reads and writes; do the network calls first.
+
+CLAUDE_LOCK_STALE_S = 60.0  # Claude Code's `stale: 60000`
+CLAUDE_LOCK_WAIT_S = float(env("CLAUDE_HOP_LOCK_WAIT") or 9.0)
+
+
+def claude_lock_dirs() -> tuple[str, str]:
+    return (
+        os.path.join(CLAUDE_DIR, ".oauth_refresh.lock"),
+        os.path.realpath(CLAUDE_DIR) + ".lock",
+    )
+
+
+def _take_dir(path: str) -> bool:
+    """mkdir as a mutex, taking over one whose holder has been silent for 60s."""
+    try:
+        os.mkdir(path)
+        return True
+    except FileExistsError:
+        pass
+    try:
+        age = time.time() - os.stat(path).st_mtime
+    except FileNotFoundError:
+        return False  # released between the mkdir and the stat; try again
+    if age > CLAUDE_LOCK_STALE_S:
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+    return False
+
+
+class claude_lock:  # noqa: N801 - used like a function: `with claude_lock():`
+    """Hold Claude Code's token-refresh locks, in its own order.
+
+    If they stay busy past the wait, stop with nothing changed. Pass
+    required=False where giving up would leave the user logged out (putting a
+    login back after `add` cleared it): that path goes ahead without them.
+    """
+
+    def __init__(self, required: bool = True):
+        self.required = required
+        self.held = False
+
+    def __enter__(self):
+        primary, legacy = claude_lock_dirs()
+        os.makedirs(CLAUDE_DIR, mode=0o700, exist_ok=True)
+        deadline = time.monotonic() + CLAUDE_LOCK_WAIT_S
+        while True:
+            if _take_dir(primary):
+                if _take_dir(legacy):
+                    self.held = True
+                    return self
+                try:
+                    os.rmdir(primary)  # Claude Code lets go of the first one too
+                except OSError:
+                    pass
+            if time.monotonic() > deadline:
+                if not self.required:
+                    return self
+                die(
+                    "Claude Code is refreshing its login right now, so nothing was changed. "
+                    "Try again in a few seconds."
+                )
+            time.sleep(0.25 + 0.25 * random.random())
+
+    def __exit__(self, *exc):
+        if self.held:
+            for path in reversed(claude_lock_dirs()):
+                try:
+                    os.rmdir(path)
+                except OSError:
+                    pass
+            self.held = False
+        return False
 
 
 # ------------------------------------------------------------------- profiles
@@ -1277,26 +1372,31 @@ def cmd_renew(name=None, yes=False, **_):
                     f"{len(pids)} session(s) running (--yes overrides)"
                 )
                 continue
-        left = refresh_left(blk)
-        if not blk.get("refreshToken"):
-            print(f"  {RED}{n}{OFF}  no saved credential - `{PROG} add {n}`")
-            failed += 1
-            continue
-        if left is not None and left <= 0:
-            print(f"  {RED}{n}{OFF}  refresh window closed - `{PROG} add {n}` to log in again")
-            failed += 1
-            continue
+        # Only the live login is in Claude Code's way: hold its refresh lock for
+        # the whole round trip, as it does, and read the login again under it.
+        with claude_lock() if n == cur and live else contextlib.nullcontext():
+            if n == cur and live:
+                blk = live_oauth() or blk
+            left = refresh_left(blk)
+            if not blk.get("refreshToken"):
+                print(f"  {RED}{n}{OFF}  no saved credential - `{PROG} add {n}`")
+                failed += 1
+                continue
+            if left is not None and left <= 0:
+                print(f"  {RED}{n}{OFF}  refresh window closed - `{PROG} add {n}` to log in again")
+                failed += 1
+                continue
 
-        fresh, ident, err = refresh_block(blk)
-        if not fresh:
-            print(f"  {RED}{n}{OFF}  {err}")
-            failed += 1
-            continue
-        # Persist before anything else can run: the old refresh token is dead
-        # from the moment that call returned.
-        save_profile(n, fresh, ident)
-        if n == cur:
-            set_live_oauth(fresh)
+            fresh, ident, err = refresh_block(blk)
+            if not fresh:
+                print(f"  {RED}{n}{OFF}  {err}")
+                failed += 1
+                continue
+            # Persist before anything else can run: the old refresh token is dead
+            # from the moment that call returned.
+            save_profile(n, fresh, ident)
+            if n == cur:
+                set_live_oauth(fresh)
         note = refresh_warning(fresh)
         tail = f"  {YELLOW}{note}{OFF}" if note else ""
         print(f"  {GREEN}{n}{OFF}  access {expiry_note(fresh)}{tail}")
@@ -1362,10 +1462,14 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
         else:
             info(f"{DIM}could not renew '{name}' first ({err}); using the saved token{OFF}")
 
-    if live and not no_sync:
-        sync_live_before_switch(live)
-
-    set_live_oauth(blk)
+    # The network work is done. From here to the write we hold Claude Code's
+    # refresh lock and read the live login again: it may have been refreshed
+    # since we first looked, and the copy we save must be that one.
+    with claude_lock():
+        live = live_oauth()
+        if live and not no_sync:
+            sync_live_before_switch(live)
+        set_live_oauth(blk)
     set_active_ptr(name)
     left = clear_provider_ptr()
     print(
@@ -1466,13 +1570,14 @@ def cmd_add(name=None, yes=False, **_):
             f"instead.\n       Run with --yes to go ahead anyway."
         )
 
-    live = live_oauth()
     prev_name = None
-    if live:
-        prev_name = sync_live_before_switch(live)
+    with claude_lock():
+        live = live_oauth()
+        if live:
+            prev_name = sync_live_before_switch(live)
+        clear_live_oauth()
+    if prev_name:
         info(f"{DIM}saved the current login ({prev_name}) before logging out{OFF}")
-
-    clear_live_oauth()
     info(f"\nStarting `claude` with no login. Sign in as the {BOLD}{name}{OFF} account")
     info("(use /login if it does not prompt), then exit with /exit or Ctrl-D.")
     info(
@@ -1501,7 +1606,8 @@ def cmd_add(name=None, yes=False, **_):
             # Nothing new was signed in - put back what was there. Never leave
             # the user logged out of everything.
             if live:
-                set_live_oauth(live)
+                with claude_lock(required=False):
+                    set_live_oauth(live)
             return False
         new = found
         # A replaced profile must not keep the old account's email and plan
@@ -1687,6 +1793,18 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
             note("warn", f"stale file {f}", "removed")
         else:
             note("warn", f"stale file {f} (contains an old credential); --fix removes it")
+
+    for d in claude_lock_dirs():
+        try:
+            age = time.time() - os.stat(d).st_mtime
+        except OSError:
+            continue
+        if age > CLAUDE_LOCK_STALE_S:
+            if fix:
+                os.rmdir(d)
+                note("warn", f"stale lock {d} ({humanise(age)} old)", "removed")
+            else:
+                note("warn", f"stale lock {d} ({humanise(age)} old, a run that died?); --fix removes it")
 
     provs = list_providers()
     for p in provs:

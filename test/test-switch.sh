@@ -778,5 +778,68 @@ printf '%s' "$out" | grep -q "beta.json is empty or not valid JSON" && ok "docto
 printf '%s' "$out" | grep -q "no problems found" && bad "...and does not call it healthy" "$out" || ok "...and does not call it healthy"
 is "the live account is still found past the broken profile" "$("$HOP" active 2>/dev/null)" "alpha"
 
+# --- 20. we keep out of Claude Code's token refresh ----------------------------
+# While it refreshes, Claude Code holds two directories as locks, takes the login
+# out of the store, calls the token endpoint and writes the result back. A switch
+# inside that window is overwritten by the old account's refreshed token. We hold
+# the same two, in its order, while we read and replace the login. Behaviour of
+# Claude Code itself was checked against 2.1.284 by tracing it in a sandbox.
+PRIMARY="$TMP/.oauth_refresh.lock"; LEGACY="$TMP.lock"
+hold() {  # hold <seconds> <dir>...  the way Claude Code does: mkdir, wait, rmdir
+  python3 -c "
+import os, sys, time
+for d in sys.argv[2:]: os.mkdir(d)
+time.sleep(float(sys.argv[1]))
+for d in reversed(sys.argv[2:]): os.rmdir(d)" "$@" &
+  HOLDER=$!
+  for _ in $(seq 50); do [ -d "${*: -1}" ] && break; sleep 0.1; done
+}
+export CLAUDE_HOP_LOCK_WAIT=1
+
+seed
+"$HOP" use beta >/dev/null 2>&1
+[ ! -e "$PRIMARY" ] && [ ! -e "$LEGACY" ] && ok "a switch leaves no lock behind" \
+  || bad "a switch leaves no lock behind" "$(ls -d "$PRIMARY" "$LEGACY" 2>&1)"
+
+seed
+hold 3 "$PRIMARY"
+out="$("$HOP" use beta 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && ok "a switch waits for Claude Code's refresh lock, then stops" || bad "a switch waits for Claude Code's refresh lock, then stops" "rc=0"
+is "...and changes nothing"  "$(live_token)" "tok-A"
+printf '%s' "$out" | grep -q "refreshing" && ok "...and says why" || bad "...and says why" "$out"
+wait "$HOLDER"
+"$HOP" use beta >/dev/null 2>&1
+is "...and works once the lock is free"  "$(live_token)" "tok-B"
+
+seed
+hold 3 "$LEGACY"
+"$HOP" use beta >/dev/null 2>&1 && bad "the legacy lock holds a switch off too" "rc=0" || ok "the legacy lock holds a switch off too"
+[ ! -e "$PRIMARY" ] && ok "...and we let go of the first lock, as Claude Code does" \
+  || bad "...and we let go of the first lock, as Claude Code does" "left $PRIMARY behind"
+wait "$HOLDER"
+
+seed
+mkdir "$PRIMARY" "$LEGACY"; touch -d '-2 minutes' "$PRIMARY" "$LEGACY"
+"$HOP" use beta >/dev/null 2>&1
+is "a lock nobody has touched for 60s is taken over"  "$(live_token)" "tok-B"
+[ ! -e "$PRIMARY" ] && [ ! -e "$LEGACY" ] && ok "...and released afterwards" || bad "...and released afterwards" "still there"
+
+seed
+hold 3 "$PRIMARY"
+add_with 'pass'
+is "add stops before logging you out when Claude Code holds the lock"  "$(live_token)" "tok-A"
+wait "$HOLDER"
+
+seed
+mkdir "$PRIMARY"; touch -d '-5 minutes' "$PRIMARY"
+"$HOP" doctor 2>&1 | grep -q "stale lock" && ok "doctor reports a lock nobody has touched for minutes" \
+  || bad "doctor reports a lock nobody has touched for minutes" "$("$HOP" doctor 2>&1)"
+"$HOP" doctor --fix >/dev/null 2>&1
+[ ! -e "$PRIMARY" ] && ok "doctor --fix removes it" || bad "doctor --fix removes it" "still there"
+mkdir "$PRIMARY"
+"$HOP" doctor 2>&1 | grep -q "stale lock" && bad "doctor leaves a fresh lock alone" "reported it" || ok "doctor leaves a fresh lock alone"
+rmdir "$PRIMARY"
+unset CLAUDE_HOP_LOCK_WAIT
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
