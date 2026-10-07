@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,14 +8,16 @@ build-backend = "setuptools.build_meta"
 # unrelated `claude-hop` project and refuses it.
 name = "claudehop-cli"
 dynamic = ["version"]
-description = "Hop Claude Code between several Claude accounts without logging in again — swap the saved OAuth login in one keystroke, keep every account's usage pool separate."
+description = "Use several Claude Code accounts on one machine: hop the saved login in one keystroke, or run a different account in each terminal. One file, no dependencies."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Ebenworks", email = "hello@ebenworks.co" }]
 requires-python = ">=3.9"
 dependencies = []
 keywords = [
     "claude", "claude-code", "anthropic", "account-switcher", "multi-account",
+    "claude-max", "claude-pro", "claude-team", "account-manager", "bedrock", "vertex-ai",
     "oauth", "credentials", "keychain", "cli", "developer-tools",
     "productivity", "shell", "terminal", "ai", "llm",
 ]
@@ -23,23 +25,29 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Version Control",
+    "Topic :: System :: Systems Administration :: Authentication/Directory",
+    "Topic :: Terminals",
     "Topic :: Utilities",
 ]
 
 [project.urls]
 Homepage = "https://github.com/psychofict/claudehop"
 Repository = "https://github.com/psychofict/claudehop"
+Documentation = "https://github.com/psychofict/claudehop#readme"
+Comparison = "https://github.com/psychofict/claudehop/blob/master/docs/comparison.md"
 Changelog = "https://github.com/psychofict/claudehop/blob/master/CHANGELOG.md"
+Discussions = "https://github.com/psychofict/claudehop/discussions"
+"Security policy" = "https://github.com/psychofict/claudehop/blob/master/SECURITY.md"
 Issues = "https://github.com/psychofict/claudehop/issues"
 Author = "https://ebenworks.co/"
 

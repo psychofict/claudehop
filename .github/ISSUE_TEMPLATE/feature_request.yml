@@ -1,0 +1,28 @@
+name: Feature request
+description: Something you would like claudehop to do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        claudehop is meant to stay one readable file with no dependencies, so the
+        useful question is what you are trying to do, not which flag to add.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+      description: The situation you are in, and what is awkward about it today.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What do you do now?
+      description: Any workaround, and what it costs you.
+  - type: dropdown
+    id: os
+    attributes:
+      label: Where do you use it?
+      options: [Linux, macOS, Both]
+    validations:
+      required: true
