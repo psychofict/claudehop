@@ -31,6 +31,14 @@ What the tool does about that:
   Claude Code uses for its own token refresh (`<config dir>/.oauth_refresh.lock`
   and `<config dir>.lock`). `doctor` reports one that a crashed run left behind.
 
+## How releases are made
+
+Each release is built by GitHub Actions and published to PyPI through trusted publishing. PyPI
+checks that the upload comes from this repository's release workflow and its `pypi` environment,
+so there is no PyPI token stored anywhere to steal. Releases carry PyPI's digital attestations,
+which say which workflow run built each file. A person still has to approve each publish in that
+environment.
+
 ## Known limits
 
 - **`.credentials.json.bak`.** When the file backend replaces the live
