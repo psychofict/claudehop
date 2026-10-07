@@ -54,16 +54,19 @@ jobs:
     environment:
       name: pypi
       url: https://pypi.org/p/claudehop-cli
+    permissions:
+      contents: read
+      id-token: write   # lets PyPI check this run is the workflow it trusts; no token is stored
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dist
           path: dist/
-      # Swap this for `permissions: id-token: write` and drop the password once
-      # a trusted publisher is configured at pypi.org/manage/account/publishing.
+      # Trusted publishing: PyPI trusts this repository, this workflow file and the
+      # `pypi` environment (set up at pypi.org/manage/project/claudehop-cli/settings/publishing),
+      # so there is no API token to store or leak.
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
 
   github-release:

@@ -3,6 +3,15 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [1.7.2] — 2026-10-07
+
+### Changed
+
+- **Releases publish to PyPI with a trusted publisher.** The release workflow used a stored
+  PyPI token. PyPI now trusts this repository, the release workflow and the `pypi` environment
+  directly, so the job proves who it is for each run and no token is kept anywhere. The tool
+  itself is unchanged.
+
 ## [1.7.1] — 2026-10-07
 
 ### Changed
