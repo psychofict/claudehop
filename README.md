@@ -12,7 +12,6 @@
 
 <p align="center">
   <a href="https://pypi.org/project/claudehop-cli/"><img src="https://img.shields.io/pypi/v/claudehop-cli.svg?color=FC5F00&label=pypi" alt="PyPI"></a>
-  <a href="https://pypi.org/project/claudehop-cli/"><img src="https://img.shields.io/pypi/dm/claudehop-cli.svg?color=FC5F00" alt="PyPI downloads per month"></a>
   <a href="https://github.com/psychofict/claudehop/actions/workflows/ci.yml"><img src="https://github.com/psychofict/claudehop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/psychofict/claudehop/blob/master/LICENSE"><img src="https://img.shields.io/badge/licence-MIT-FC5F00.svg" alt="Licence: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-1D1009.svg" alt="Python 3.9+">
@@ -77,29 +76,32 @@ does less than its two big alternatives on purpose, and where they go further th
 
 | | claudehop | [claude-swap](https://github.com/realiti4/claude-swap) | [clauth](https://github.com/uwuclxdy/clauth) |
 |---|---|---|---|
-| Size of the tool | 97 KB, one file | 1.2 MB, 24,400 lines | 15.7 MB binary |
-| Extra packages to install | none | 10 | none (a binary) |
+| Size of the tool | 97 KB | 1.2 MB | 15.7 MB |
+| Extra packages | none | 10 | none |
 | Time to start | 22 ms | 71 ms | not measured |
-| A different account per terminal | `hop run` | `cswap run` | `clauth start` |
-| Chat history across accounts | shared by default | per account unless asked | browse and resume |
-| Bedrock, Vertex or a gateway | yes | API keys only | custom endpoints |
-| Login about to expire | warns 14 days ahead, plans one sitting | quarantines it once dead | reports it expired |
-| Background process | never | optional | optional daemon |
-| Switches by itself near a limit | no | yes | yes |
+| Account per terminal | yes | yes | yes |
+| History across accounts | shared | opt in | browse |
+| Bedrock, Vertex, gateway | yes | API keys | endpoints |
+| Login about to expire | warns early | when dead | when expired |
+| Background process | never | optional | optional |
+| Switches by itself | no | yes | yes |
 | Terminal interface | no | yes | yes |
 | Windows | no | yes | yes |
+
+Size is the tool's own code: claudehop is one file, claude-swap is 24,400 lines and clauth is a
+compiled binary. The cells are short on purpose; the comparison page spells each one out.
 
 A switcher holds your refresh tokens, so a tool you can read in one sitting is a security
 property, not only a size. The 30-day login window is the other gap: an account's refresh token dies
 30 days after the login that issued it, and renewing does not move that date. `hop doctor` works out
 the day the earliest account comes due and tells you to log them all in then, so they share one
-date from then on. Neither alternative documents this. Every number, how it was measured and what
+date from then on. Neither alternative's README mentions it. Every number, how it was measured and what
 the others do better is on the
 [comparison page](https://github.com/psychofict/claudehop/blob/master/docs/comparison.md).
 
 ## Commands
 
-| | |
+| Command | What it does |
 |---|---|
 | `hop` | pick an account from a menu |
 | `hop <name>` | move every open `claude` to that account's login |
