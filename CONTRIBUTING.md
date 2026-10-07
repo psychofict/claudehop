@@ -55,7 +55,6 @@ pull request.
   against Claude Code's own `security` calls and tested through a stand-in, but
   nobody has run it on real hardware yet.
 - fish shell completion (`shell/claudehop.sh` is POSIX/bash + zsh today).
-- A `--verify` cache so `list --verify` doesn't re-ask the API every time.
 
 ## Style
 

@@ -3,6 +3,16 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`hop list --verify` caches identity lookups.** Responses (email, plan, account UUID,
+  and token state) are remembered in `accounts/.verify-cache` for 60 seconds (no tokens
+  are stored), preventing repeated API calls when running `list --verify` frequently (#6).
+- **`--no-cache` / `--fresh` flag** bypasses the local cache for `hop list --verify` and
+  `hop usage`, forcing an immediate query to the API.
+
 ## [1.7.1] — 2026-10-07
 
 ### Changed

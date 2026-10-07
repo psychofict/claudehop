@@ -124,7 +124,9 @@ Linux only for now.
 
 **Usage.** `hop usage` reads the usage endpoint that Claude Code itself calls. It limits other
 clients, so `hop usage` asks only when you run it, remembers the last good reading, and waits out the
-server's `Retry-After`. Nothing polls in the background.
+server's `Retry-After`. `hop list --verify` similarly remembers identity lookups for 60 seconds
+(never storing tokens). `--no-cache` / `--fresh` bypasses the cache for both commands.
+Nothing polls in the background.
 
 ```
 $ hop usage

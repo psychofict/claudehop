@@ -851,8 +851,8 @@ unset CLAUDE_HOP_LOCK_WAIT
 # Driven in-process with a fake endpoint. The real one budgets requests from
 # clients that are not Claude Code, so the command asks only when run, remembers
 # the last good reading, and waits out a Retry-After.
-usage_run() {  # usage_run <python that defines `responses`> [json] [name]
-  HOP="$HOP" RESPONSES="$1" AS_JSON="${2:-}" ONLY="${3:-}" python3 - <<'PY'
+usage_run() {  # usage_run <python that defines `responses`> [json] [name] [no_cache]
+  HOP="$HOP" RESPONSES="$1" AS_JSON="${2:-}" ONLY="${3:-}" NO_CACHE="${4:-}" python3 - <<'PY'
 import importlib.machinery, importlib.util, os, json, datetime
 loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
 ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
@@ -867,7 +867,11 @@ def fake(tok, timeout=0):
     calls.append(tok)
     return ns["responses"][tok]
 ca.api_usage = fake
-ca.cmd_usage(name=os.environ["ONLY"] or None, as_json=bool(os.environ["AS_JSON"]))
+ca.cmd_usage(
+    name=os.environ["ONLY"] or None,
+    as_json=bool(os.environ["AS_JSON"]),
+    no_cache=bool(os.environ.get("NO_CACHE")),
+)
 print("CALLS=%d" % len(calls))
 PY
 }
@@ -894,6 +898,9 @@ grep -qE "tok-A|tok-B" "$UC" && bad "the cache holds no tokens" "found one" || o
 out="$(usage_run "$two_ok")"
 is "a reading under a minute old is not asked for again" "$(calls_of "$out")" "0"
 printf '%s' "$out" | grep -q "42%" && ok "...and is still shown" || bad "...and is still shown" "$out"
+
+out="$(usage_run "$two_ok" "" "" 1)"
+is "--no-cache bypasses the usage cache" "$(calls_of "$out")" "2"
 
 # a 429 is remembered, and the last good reading stays on screen
 python3 -c "
@@ -949,6 +956,68 @@ seed; rm -f "$UC"
 out="$(USAGE_OFFLINE=1 usage_run "$two_ok")"
 is "offline mode makes no request" "$(calls_of "$out")" "0"
 printf '%s' "$out" | grep -q "offline" && ok "...and says so" || bad "...and says so" "$out"
+seed
+
+# --- 21b. list --verify: identity cache and bypass -----------------------------
+verify_run() {  # verify_run <python defining `responses`> [json] [no_cache]
+  HOP="$HOP" RESPONSES="$1" AS_JSON="${2:-}" NO_CACHE="${3:-}" python3 - <<'PY'
+import importlib.machinery, importlib.util, os, json
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+ca.OFFLINE = os.environ.get("VERIFY_OFFLINE") == "1"
+ns = {}
+exec(os.environ["RESPONSES"], ns)
+calls = []
+def fake(tok, timeout=0):
+    calls.append(tok)
+    return ns["responses"][tok]
+ca.api_profile = fake
+ca.cmd_list(verify=True, as_json=bool(os.environ["AS_JSON"]), no_cache=bool(os.environ["NO_CACHE"]))
+print("CALLS=%d" % len(calls))
+PY
+}
+VC="$CLAUDE_ACCOUNTS_DIR/.verify-cache"
+two_idents='responses = {
+  "tok-A": (200, {"account": {"email": "alpha@x.com", "uuid": "uuid-A", "has_claude_max": True}, "organization": {"name": "Org A"}}),
+  "tok-B": (200, {"account": {"email": "beta@x.com", "uuid": "uuid-B", "has_claude_pro": True}, "organization": {"name": "Org B"}})}'
+
+seed; rm -f "$VC"
+out="$(verify_run "$two_idents")"
+is "verify makes one request per account on first run" "$(calls_of "$out")" "2"
+[ -f "$VC" ] && ok "the verify cache file is written" || bad "the verify cache file is written" "missing"
+[ "$(stat -c %a "$VC" 2>/dev/null || stat -f %Lp "$VC")" = "600" ] && ok "the verify cache is private" || bad "the verify cache is private" "$(ls -l "$VC" 2>/dev/null)"
+grep -qE "tok-A|tok-B" "$VC" && bad "the verify cache holds no tokens" "found one" || ok "the verify cache holds no tokens"
+printf '%s' "$out" | grep -E "alpha" | grep -q "ok" && ok "verify shows token state ok" || bad "verify shows token state ok" "$out"
+printf '%s' "$out" | grep -E "beta" | grep -q "ok" && ok "...for every account" || bad "...for every account" "$out"
+
+out="$(verify_run "$two_idents")"
+is "a verify reading under a minute old is not asked for again" "$(calls_of "$out")" "0"
+printf '%s' "$out" | grep -E "alpha" | grep -q "ok" && ok "...and is still shown from cache" || bad "...and is still shown from cache" "$out"
+
+out="$(verify_run "$two_idents" "" 1)"
+is "--no-cache bypasses the verify cache" "$(calls_of "$out")" "2"
+
+python3 -c "
+import json,os
+p=os.environ['CLAUDE_ACCOUNTS_DIR']+'/.verify-cache'; d=json.load(open(p))
+for v in d.values(): v['fetchedAt'] -= 600
+json.dump(d,open(p,'w'))"
+out="$(verify_run "$two_idents")"
+is "an aged-out verify reading is asked for again" "$(calls_of "$out")" "2"
+
+out="$(verify_run "$two_idents" json)"
+is "verify --json uses cache" "$(calls_of "$out")" "0"
+printf '%s' "$out" | sed '/^CALLS=/d' | python3 -c "
+import json,sys
+d=json.load(sys.stdin)['accounts']
+a=[x for x in d if x['name']=='alpha'][0]
+assert a['tokenState'] == 'ok'
+print('ok')" 2>/dev/null | grep -q ok && ok "verify --json outputs cached tokenState" || bad "verify --json outputs cached tokenState" "$out"
+
+seed; rm -f "$VC"
+out="$(VERIFY_OFFLINE=1 verify_run "$two_idents")"
+is "offline mode makes no verify request" "$(calls_of "$out")" "0"
 seed
 
 # --- 22. run: one terminal on its own account -----------------------------------
