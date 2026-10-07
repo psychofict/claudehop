@@ -3,6 +3,27 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [1.7.1] — 2026-10-07
+
+### Changed
+
+- **The README is half its length and leads with evidence.** It now opens with the two
+  commands that cover the tool, then a table of measured differences from claude-swap and
+  clauth (size, packages, start-up time, features), including the rows where they are ahead.
+  The method and every number are on a new comparison page. The reference material that
+  was in the README moved, with its text kept, to `docs/commands.md` and
+  `docs/how-it-works.md`.
+- **Package metadata.** A new summary, more keywords (Max, Pro, Team, Bedrock, Vertex),
+  links to the docs, the comparison, Discussions and the security policy, and the licence
+  in the current standard form (the old table form was deprecated). The sdist now carries
+  the docs.
+
+### Added
+
+- A code of conduct, a pull request template, a feature request form, a support page,
+  code owners, and Dependabot for the pinned GitHub Actions.
+- A weekly and per-push CodeQL scan of the Python.
+
 ## [1.7.0] — 2026-10-06
 
 ### Added

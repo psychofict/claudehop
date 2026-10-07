@@ -1,17 +1,18 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/psychofict/claudehop/master/assets/cover.png" alt="claudehop — hop Claude Code between accounts" width="560">
+  <img src="https://raw.githubusercontent.com/psychofict/claudehop/master/assets/cover.png" alt="claudehop: use several Claude Code accounts on one machine" width="560">
 </p>
 
 <h1 align="center">claudehop</h1>
 
 <p align="center">
-  <b>Hop Claude Code between several Claude accounts without logging in again.</b><br>
-  Personal Max account in one terminal, work Team seat in another.
-  <i>Two separate usage pools, one machine, no browser round-trip.</i>
+  <b>Use several Claude Code accounts on one machine.</b><br>
+  Move every terminal to another login in one keystroke, or give each terminal its own account.<br>
+  <i>One file, no dependencies, no background process.</i>
 </p>
 
 <p align="center">
   <a href="https://pypi.org/project/claudehop-cli/"><img src="https://img.shields.io/pypi/v/claudehop-cli.svg?color=FC5F00&label=pypi" alt="PyPI"></a>
+  <a href="https://pypi.org/project/claudehop-cli/"><img src="https://img.shields.io/pypi/dm/claudehop-cli.svg?color=FC5F00" alt="PyPI downloads per month"></a>
   <a href="https://github.com/psychofict/claudehop/actions/workflows/ci.yml"><img src="https://github.com/psychofict/claudehop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/psychofict/claudehop/blob/master/LICENSE"><img src="https://img.shields.io/badge/licence-MIT-FC5F00.svg" alt="Licence: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-1D1009.svg" alt="Python 3.9+">
@@ -20,15 +21,25 @@
 
 <p align="center">
   <a href="#install">Install</a> ·
+  <a href="#why-claudehop">Why claudehop</a> ·
+  <a href="#commands">Commands</a> ·
+  <a href="#faq">FAQ</a> ·
   <a href="https://github.com/psychofict/claudehop/blob/master/CHANGELOG.md">Changelog</a> ·
   <a href="https://github.com/psychofict/claudehop/blob/master/SECURITY.md">Security</a>
 </p>
 
 ---
 
-## Switching accounts
+Two commands cover it.
 
-Run `hop`, press a number.
+```bash
+hop work                    # every open claude moves to the work account, on its next message
+hop run home -- --resume    # claude as the home account in this terminal only
+```
+
+`hop` swaps the saved login. `hop run` gives one terminal its own account and leaves your other
+terminals alone, so a Max account in one terminal and a Team seat in another each spend their own
+usage pool. Neither opens a browser.
 
 ```
 $ hop
@@ -40,143 +51,78 @@ hop to which? [1-2, Enter to stay] 1
 switched to home (me@gmail.com, max)
 ```
 
-Claude Code reads its login again before every message, so a hop reaches the
-`claude` sessions you already have open too, on their next message. That's the
-whole tool.
-
-If you'd rather not read a menu, `hop home` goes straight there. To use two
-accounts at the same time, see [One account per terminal](#one-account-per-terminal).
-
 ## Install
 
 ```bash
 pipx install claudehop-cli          # or: pip install --user claudehop-cli
-eval "$(claudehop shell-init)"      # the `hop` alias + tab-completion
+eval "$(claudehop shell-init)"      # the `hop` alias and tab-completion
 ```
 
-Put that `eval` line in your `~/.bashrc` or `~/.zshrc` and open a new terminal.
-`hop` and `claudehop` are the same command. (The distribution carries the `-cli`
-suffix because PyPI holds the bare name too close to an unrelated project. The
-commands don't.)
+Put the `eval` line in your `~/.bashrc` or `~/.zshrc` and open a new terminal. `hop` and
+`claudehop` are the same command. The package name carries a `-cli` suffix because PyPI holds the
+bare name too close to an unrelated project; the commands don't. It needs Python 3.9 or newer and
+Claude Code, on Linux or macOS. To install from a clone instead, run `./install.sh`.
 
-Or from a clone, if you'd rather have it symlinked into `~/.claude` with the
-shell glue written for you:
+Then save the login you already have, and add the others:
 
 ```bash
-git clone https://github.com/psychofict/claudehop.git
-cd claudehop
-./install.sh          # symlinks into ~/.claude, adds one line to your rc file
+hop save home        # names whatever is logged in right now
+hop add work         # logs in as a second account and saves it
 ```
 
-`./install.sh --copy` installs copies instead of symlinks, `--no-rc` skips the
-shell wiring, `--uninstall` reverses it. None of them ever touch
-`~/.claude/accounts/`, where the credentials live.
+## Why claudehop
 
-Requires Python 3.9+ and Claude Code. Linux and macOS. One module, no
-dependencies.
+claudehop is the smallest tool that does this job, and the one that plans your monthly re-login. It
+does less than its two big alternatives on purpose, and where they go further the table says so.
 
-## Adding an account
+| | claudehop | [claude-swap](https://github.com/realiti4/claude-swap) | [clauth](https://github.com/uwuclxdy/clauth) |
+|---|---|---|---|
+| Size of the tool | 97 KB, one file | 1.2 MB, 24,400 lines | 15.7 MB binary |
+| Extra packages to install | none | 10 | none (a binary) |
+| Time to start | 22 ms | 71 ms | not measured |
+| A different account per terminal | `hop run` | `cswap run` | `clauth start` |
+| Chat history across accounts | shared by default | per account unless asked | browse and resume |
+| Bedrock, Vertex or a gateway | yes | API keys only | custom endpoints |
+| Login about to expire | warns 14 days ahead, plans one sitting | quarantines it once dead | reports it expired |
+| Background process | never | optional | optional daemon |
+| Switches by itself near a limit | no | yes | yes |
+| Terminal interface | no | yes | yes |
+| Windows | no | yes | yes |
 
-```bash
-hop add work
-```
+A switcher holds your refresh tokens, so a tool you can read in one sitting is a security
+property, not only a size. The 30-day login window is the other gap: an account's refresh token dies
+30 days after the login that issued it, and renewing does not move that date. `hop doctor` works out
+the day the earliest account comes due and tells you to log them all in then, so they share one
+date from then on. Neither alternative documents this. Every number, how it was measured and what
+the others do better is on the
+[comparison page](https://github.com/psychofict/claudehop/blob/master/docs/comparison.md).
 
-Quit your other `claude` sessions first. `add` will stop and tell you if you
-haven't, because a session left running can write its own token back into the
-credential store mid-login and you'd end up with the wrong account saved under
-that name.
+## Commands
 
-Don't `/logout` first. `add` clears the local login itself, and a `/logout` may
-also revoke the refresh token of the account you are leaving on Anthropic's side
-(claude-swap's documentation reports this; I have not tested it).
+| | |
+|---|---|
+| `hop` | pick an account from a menu |
+| `hop <name>` | move every open `claude` to that account's login |
+| `hop run <name> [claude args]` | claude as that account in this terminal only |
+| `hop add <name>` · `hop save <name>` | log in as a new account · save the login you have |
+| `hop usage` | 5-hour and 7-day usage per account, when each resets |
+| `hop provider <name> <command>` · `hop off` | Bedrock, Vertex or a gateway, hopped to like an account |
+| `hop doctor` | check the setup and the next re-login date; `--fix` repairs what it can |
+| `hop renew` · `hop whoami` · `hop rm` · `hop rename` | keep the saved logins current and tidy |
 
-`add` then starts `claude` with no login so you can `/login`, and saves whatever
-that produces when you exit with `/exit`. **Paste the login URL into a private
-browser window.** Your normal browser is already signed in as one of your other
-accounts and will authorise that one without asking.
+`--json` on `list`, `whoami`, `active`, `usage` and `doctor` gives output with no secrets in it,
+for scripts and statuslines. The full reference is in
+[docs/commands.md](https://github.com/psychofict/claudehop/blob/master/docs/commands.md).
 
-If the login produces nothing (you changed your mind, you hit Ctrl-C), your
-previous credentials come back. If it does produce a login, that login is saved
-even if the terminal dies on the way out.
+**One account per terminal.** `hop run work` points `claude` at a config home of its own, so your
+other terminals keep their account. Your settings, skills, agents, plugins, `CLAUDE.md`, prompt
+history and `projects` are linked in, so the session looks like your normal one and conversations
+and memory are shared across accounts. The renewed login is saved back when the session ends.
+Linux only for now.
 
-Already logged in by hand? `hop save work` names whatever is live right now.
-
-## Providers: Bedrock, Vertex, a gateway
-
-Some ways of running Claude Code are not a login at all: Amazon Bedrock and
-Vertex read environment variables, and a gateway is a base URL. Write a small
-launcher script that sets them and runs `claude "$@"`, register it once, and
-hop to it like an account:
-
-```bash
-hop provider bedrock claude-bedrock   # name, then the command to run instead of `claude`
-hop bedrock                           # new `claude` commands go through the launcher
-hop off                               # back to your saved login
-```
-
-Hopping to an account (`hop work`) also switches a provider off. Saved logins
-are never touched, so a provider works even when a login has expired. `hop`
-lists providers under your accounts, `hop active` prints the provider's name
-while one is on (`hop active --json` keeps the account too), and `hop doctor`
-reports a launcher that has gone missing.
-
-The switch is read by a `claude` function in the shell glue, so it applies to
-terminals that have loaded it (`source ~/.claude/claudehop.sh`, or open a new
-one). Sessions that are already running keep what they started with. The
-command must be a single word; put arguments in the launcher.
-
-## Everything else
-
-```bash
-hop whoami           # who am I right now (asks the API)
-hop usage            # 5-hour and 7-day usage of every account
-hop renew            # refresh the saved tokens; one name, or all of them
-hop --long           # add token expiry and save dates to the listing
-hop list --verify    # check every saved token against the API
-hop rm <name>        # delete a saved account (does not log you out)
-hop rename <a> <b>
-hop doctor           # check the setup; --fix repairs what it can
-hop shell-init       # shell glue for a pip install: alias + tab-completion
-```
-
-`--json` on `list`, `whoami`, `active` and `doctor` gives machine-readable
-output with no secrets in it, for scripts and statuslines. `hop active` prints
-just the active name with no network call. `hop use <name>` is the long spelling
-of `hop <name>`, and `hop sync` writes the live login back to its own file.
-
-## One account per terminal
-
-```bash
-hop run work              # claude as the work account, in this terminal only
-hop run home -- --resume  # everything after the name goes to claude
-```
-
-`hop run <name>` starts `claude` as that account and leaves the live login
-alone. Your other terminals keep their account, and a `hop` somewhere else does
-not move this one.
-
-Each account gets a config home of its own, `accounts/.run/<name>/`, and
-`claude` is pointed at it with `CLAUDE_CONFIG_DIR`. The home holds the account's
-login and a copy of your global config without the signed-in account. Your
-settings, `CLAUDE.md`, skills, agents, commands, hooks, plugins, output styles,
-keybindings, plans, prompt history and `projects` are links to the real ones, so
-a run session looks like your normal one, and conversations and memory are shared
-across accounts. `CLAUDE_HOP_SHARE=notes.md,other` links more names. Things you
-change inside a session in the copied config (a new MCP server, a trust prompt)
-stay in its home, and MCP logins belong to the account.
-
-The login in that home is the one Claude Code renews, so `hop run` saves it back
-to the profile when the session ends, and `doctor --fix` does the same after a
-crash. While a session is open, `use`, `renew`, `rm` and `rename` leave its
-account alone, because two copies of one login would rotate separately and one
-would be signed out. Running the live account is plain `claude`, with no second
-home. If you `/login` as someone else inside a session, that login is saved under
-its own name and the account you ran is unchanged.
-
-Linux for now. On macOS Claude Code keeps its login in the keychain, and a second
-login under another config dir is not handled yet.
-
-## Usage
+**Usage.** `hop usage` reads the usage endpoint that Claude Code itself calls. It limits other
+clients, so `hop usage` asks only when you run it, remembers the last good reading, and waits out the
+server's `Retry-After`. Nothing polls in the background.
 
 ```
 $ hop usage
@@ -185,223 +131,65 @@ $ hop usage
 *  work   42%  resets 2h14m  18%  resets 3d4h
 ```
 
-How much of each account's 5-hour and 7-day allowance is spent, and when each
-window resets, read from the endpoint behind Claude Code's own `/usage`. That
-endpoint limits clients other than Claude Code, and a throttled token can stay
-blocked for about half an hour (a `Retry-After` of 1524 seconds has been seen).
-So `hop usage` asks only when you run it, remembers the last good reading in
-`accounts/.usage-cache` (percentages and times, no tokens), and does not ask
-again until the server's `Retry-After` has passed. A throttled row shows the
-last reading and its age. Nothing polls in the background, and an account whose
-access token has aged out is left alone: `hop renew <name>` refreshes it.
-`hop usage <name>` checks one account, `--json` is for scripts.
+## Before you hop
 
-## How it works
+- A hop moves every running `claude`, not only new ones. Claude Code reads its login again before
+  each message, so a conversation under way changes account on its next message and starts a new
+  prompt cache. Use `hop run` when you want two accounts at once.
+- Paste the `/login` URL into a private browser window. Your normal browser is already signed in as
+  one of your other accounts and will authorise that one without asking.
+- `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` in the environment override the saved login.
+  `hop whoami` and `hop doctor` warn when either is set.
+- Each account keeps its own rate limits and terms. This moves your own logins between your own
+  terminals. It is not a way to pool quota.
 
-Claude Code keeps the live login under the `claudeAiOauth` key of its credential
-store. This tool keeps one saved copy of that block per account in
-`~/.claude/accounts/<name>.json` and swaps the active one in and out. The
-`mcpOAuth` key in the same store, which holds your Vercel/Neon/etc. MCP logins, is left
-alone, so switching accounts doesn't sign you out of anything else.
+## FAQ
 
-| | credential store |
-|---|---|
-| Linux | `~/.claude/.credentials.json` |
-| macOS | login keychain item `Claude Code-credentials`, falling back to the file |
+*How do I use two Claude Code accounts on one machine?* Install claudehop, run `hop save home` while
+logged in to the first account, then `hop add work` for the second. After that `hop work` and
+`hop home` switch between them without a browser.
 
-The backend is detected from whichever one currently holds a login. Force it
-with `CLAUDE_HOP_BACKEND=file` or `=keychain` if you need to.
+*Can two terminals use two different accounts at the same time?* Yes, with `hop run <name>`. A plain
+`hop` cannot, because Claude Code reads its login again before every message, so a hop reaches every
+open session. `hop run` gives one terminal its own config home and leaves the others alone.
 
-Nothing else needs patching. Account identity in `~/.claude.json`
-(`oauthAccount`) is re-fetched from the API by Claude Code at startup: put a
-bogus email in there, start a session, and it comes back corrected. So swapping
-the credential is the whole job.
+*Does switching sign me out of my MCP servers?* No. The credential store holds your MCP logins under
+their own key, and claudehop swaps only the Claude login block.
 
-Identity, plan and token checks come from `GET /api/oauth/profile` with the
-account's own bearer token. Set `CLAUDE_HOP_OFFLINE=1` to skip every API call.
+*Does it work with Bedrock, Vertex or a gateway?* Yes. Write a small launcher that sets the
+environment variables and runs `claude "$@"`, register it with `hop provider`, and `hop <name>` sends
+new `claude` commands through it. Your saved logins are never touched.
 
-### Two details that make or break it
+*Where are my tokens, and where do they go?* In `~/.claude/accounts/`, a folder only you can open,
+with each file private to you. Tokens go only to Anthropic: `api.anthropic.com` to learn who you are
+and your usage, and `platform.claude.com` to renew one.
+[SECURITY.md](https://github.com/psychofict/claudehop/blob/master/SECURITY.md) has the threat model.
 
-**Access tokens rotate.** Claude Code refreshes them every few hours and writes
-the new one straight into the credential store. A switcher that identifies the
-active profile by comparing token values therefore stops recognising it after
-the first refresh, and then loses the refreshed token when you switch away. So
-the active profile is tracked in `accounts/active` and confirmed against the
-account UUID from the API, and every switch writes the live block back to its
-profile before loading the next one.
+*How does it work, and how do I know it is right?* claudehop keeps one saved copy of each login and
+swaps the live one in and out while holding Claude Code's own refresh lock. Every claim about Claude
+Code's behaviour was measured and names the version it was measured on; the experiments and the
+30-day login window are in
+[docs/how-it-works.md](https://github.com/psychofict/claudehop/blob/master/docs/how-it-works.md). The
+roughly 240 checks in `test/test-switch.sh` run against fake logins with no network.
 
-**A login you can't identify is stashed, never dropped.** If the live
-credentials match no saved profile (you ran `/login` by hand, say), switching
-saves them under a name derived from the account's email first. You can always
-get back to a session you'd otherwise have to re-authenticate.
+*How does it differ from claude-swap or clauth?* It is smaller, starts faster, plans your monthly
+re-login and has no background process. They add automatic switching, a terminal interface and
+Windows support. The
+[comparison page](https://github.com/psychofict/claudehop/blob/master/docs/comparison.md) has the
+numbers and the method.
 
-### It takes Claude Code's refresh lock
+## Contributing and licence
 
-While Claude Code refreshes a token it holds two lock directories
-(`~/.claude/.oauth_refresh.lock` and `~/.claude.lock`), reads the login, calls
-the token endpoint and writes the result back. A switch that landed in that
-window would be overwritten, and the account you had just left would be saved
-with a refresh token the server had already retired. So every command that
-replaces the live login holds the same two locks, in Claude Code's order, for
-the length of the file read and write, with the network calls done first. If
-Claude Code is mid-refresh it waits up to 9 seconds, then stops with nothing
-changed (`CLAUDE_HOP_LOCK_WAIT` sets the wait). `doctor` reports a lock left
-behind by a run that died.
+Issues and pull requests are welcome; start with
+[CONTRIBUTING.md](https://github.com/psychofict/claudehop/blob/master/CONTRIBUTING.md), and see
+[the open issues](https://github.com/psychofict/claudehop/issues) for places to help, including
+macOS support for `hop run`. Ask questions in
+[Discussions](https://github.com/psychofict/claudehop/discussions). If claudehop saved you a
+browser round-trip this morning, a star on [GitHub](https://github.com/psychofict/claudehop)
+helps others find it.
 
-Claude Code's side was checked on 2.1.284 by tracing it in a sandbox with the
-network cut off: it waits when another tool holds either lock and never removes
-one younger than 60 seconds. It is not a documented interface, so a later
-version may change it.
-
-## Gotchas
-
-- A hop moves **every** running `claude`, not only new ones. Claude Code reads
-  the credential store again before each message: with a fake endpoint, a
-  session sent its next message with the new login about two seconds after the
-  swap (Linux, Claude Code 2.1.284, headless mode). So a conversation already
-  under way changes account on its next message, moves to the new account's
-  usage, and starts a new prompt cache. `claudehop` lists the sessions it finds
-  when you hop. It also means one `hop` cannot give two terminals two accounts at
-  once; `hop run` can. On macOS claude-swap's documentation says the keychain
-  read is cached for about half a minute first; that is not tested here.
-- `/login` opens your default browser, which is already signed in as somebody.
-  Paste the URL into an incognito window to authenticate as a different account.
-- `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` in the environment override
-  the saved login entirely. `whoami` and `doctor` warn when either is set.
-- `--long` showing `expired (auto-renews)` under `TOKEN` is normal. The access
-  token is short lived and Claude Code renews it from the refresh token.
-  `list --verify` prints `stale (renews)` for the same reason. What actually
-  matters is the refresh token; see below. This is why the default listing
-  doesn't show either of them.
-- Each account still has its own rate limits and its own terms. This moves your
-  own logins between your own terminals; it is not a way to pool quota.
-
-## Every account needs a real login about once a month
-
-The refresh token is good for up to 30 days from the `/login` that issued it,
-and **using the account does not extend it.** Measured 2026-08-06 across four
-accounts: one had its access token reissued that morning and its refresh window
-still ended 30 days after its first login, not 30 days after the refresh.
-
-Confirmed again 2026-08-31 by refreshing a saved token by hand. The call does
-rotate the refresh token, so it is easy to assume the clock rotates with it, but
-the reply came back with `refresh_token_expires_in` landing on the same
-wall-clock minute the old token was already going to die on. Access tokens are a
-flat 8 hours. A fresh login can also hand back less than the full 30 days: one
-account re-logged-in that morning got 27.5.
-
-So this is a hard monthly expiry per account, nothing on this side can lengthen
-it, and `hop renew` is honest about that. Renewing keeps the saved copies usable
-and current, which is worth doing, but only `hop add <name>` resets the clock.
-`claude setup-token` is not a way around it either; those tokens expire too, and
-carry inference scope only.
-
-With several accounts the dates drift apart and you get a browser round-trip per
-account per month. Logging in early resets the whole 30 days, so the cheap move is
-to do them all on the day the earliest one comes due. After that they share one
-date and it's one sitting a month. `doctor` works this out for you:
-
-```
-$ hop doctor
-  accounts     /home/you/.claude/accounts (4 saved)
-  active       work
-  re-login     by 2026-08-30 (work); the other 3 by 2026-09-04
-               windows are ~30d from login and do not slide, so re-login all 4 on
-               2026-08-30 and they collapse to one date
-```
-
-You also get a per-account warning starting 14 days out. `doctor --json` carries
-the same dates under `reloginPlan`, if you want to hang a reminder off them.
-`extras/` has two ready-made ones: a statusline snippet that counts down the last
-week, and a systemd user timer. The timer renews the saved tokens daily and
-raises a desktop notification before the earliest window closes.
-
-One thing worth knowing about how this is reported. A saved profile is a snapshot
-from the last hop or sync, but Claude Code rotates the live token behind it every
-few hours and a browser re-login replaces it outright. For whichever account is
-active, the credential store is therefore newer than its own saved copy, and that
-is what `list` and `doctor` judge it by. Reading the snapshot instead is how a
-perfectly good login gets reported as expired. `doctor` tells you when the saved
-copy has fallen behind, and `--fix` syncs it.
-
-## Why not `claude setup-token`
-
-The obvious approach is a long-lived token per account exported as
-`CLAUDE_CODE_OAUTH_TOKEN`. It doesn't hold up:
-
-- those tokens carry inference scope only: `/api/oauth/profile` answers `403 OAuth
-  token does not meet scope requirement`, so you can't tell whose token you're
-  holding or whether it's still good;
-- they expire, and a dead one looks exactly like a live one until a request fails;
-- it's per-shell, so every terminal has to be primed before `claude` starts.
-
-Swapping the real credential block avoids all three and matches what Claude Code
-already does to itself.
-
-## Other tools
-
-claudehop stays one readable file with no dependencies. Other tools do more, at
-a larger size:
-
-- [claude-swap](https://github.com/realiti4/claude-swap) (Python) has a live
-  usage dashboard, switches automatically before a rate limit, and starts one
-  terminal on its own account with `cswap run`.
-- [clauth](https://github.com/uwuclxdy/clauth) (Rust) does the same in a terminal
-  interface, with a fallback chain between accounts and a background process.
-- [claude-acc](https://github.com/Nemo-Illusionist/claude-code-account-switcher)
-  (Rust) ties an account to a directory, so `cd` changes it.
-
-`hop run` covers the per-terminal case. claudehop has no automatic switching near
-a rate limit, no terminal interface and no per-directory accounts. The feature
-lists above are from their READMEs on 2026-10-06.
-
-## Security
-
-Saved credentials are real, live Claude logins. `accounts/` is `700`, every
-profile is `600`, and writes are atomic. Tokens go only to Anthropic:
-`api.anthropic.com` (who you are, and your usage) and `platform.claude.com`
-(renewing a token, only when you run `renew` or hop to an account whose access
-token has aged out). See
-[SECURITY.md](https://github.com/psychofict/claudehop/blob/master/SECURITY.md)
-for the threat model and how to report a problem.
-
-## Files
-
-```
-claudehop.py                 the tool (python3, stdlib only)
-shell/claudehop.sh           PATH, tab-completion, back-compat aliases
-extras/statusline-snippet.sh show the active account in the Claude Code statusline
-install.sh                   symlink/copy into ~/.claude, wire up the rc file
-pyproject.toml               packaging: one module, no dependencies, two commands
-test/test-switch.sh          about 240 checks against a throwaway config dir, no network
-assets/                      logo, icon, cover and social preview (svg sources + png)
-```
-
-## Tests
-
-```bash
-./test/test-switch.sh
-```
-
-Runs entirely inside a temp dir with fake credentials. It never reads or writes
-a real account, and never touches the network. Covers the swap, mcpOAuth
-preservation, token rotation, the stash path, concurrent switches, the macOS
-keychain backend (through a stand-in `security`), `add` rolling back a failed
-login, `add` surviving a teardown after a successful one, the refresh race, JSON
-output, table layout, housekeeping and file permissions.
-
-## Contributing
-
-Issues and pull requests are welcome; see
-[CONTRIBUTING.md](https://github.com/psychofict/claudehop/blob/master/CONTRIBUTING.md).
-If `claudehop` saved you a browser round-trip this morning, a ⭐ on
-[GitHub](https://github.com/psychofict/claudehop) helps others find it.
-
-## Licence
-
-MIT. Not affiliated with, endorsed by, or sponsored by Anthropic. "Claude" and
-"Claude Code" are trademarks of Anthropic, PBC, used here only to say what this
-works with.
+MIT licence. Not affiliated with, endorsed by, or sponsored by Anthropic. "Claude" and "Claude Code" are
+trademarks of Anthropic, PBC, used here only to say what this works with.
 
 ---
 
