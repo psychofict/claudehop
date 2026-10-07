@@ -23,7 +23,8 @@ What the tool does about that:
   `renew` or a hop to an account whose access token has aged out).
   Requests say they come from claudehop; the tool does not pose as Claude Code.
   `CLAUDE_HOP_OFFLINE=1` disables all of them.
-- `accounts/.usage-cache` holds usage percentages and reset times, never a token.
+- `accounts/.usage-cache` and `accounts/.verify-cache` hold usage and verification
+  metadata (times, percentages, email, plan, token state), never a token.
 - `hop run` keeps a copy of an account's login in `accounts/.run/<name>/` (folder `700`,
   login `600`). `rm` deletes it, unlinking and never following the links that point at your
   own settings and projects.
