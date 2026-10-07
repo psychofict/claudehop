@@ -1,6 +1,7 @@
 # Contributing
 
-Thanks for looking. This is a small tool and it intends to stay small.
+Thanks for looking. This is a small tool and it intends to stay small. Taking part means following the
+[code of conduct](https://github.com/psychofict/claudehop/blob/master/CODE_OF_CONDUCT.md).
 
 ## The rules that keep it small
 
