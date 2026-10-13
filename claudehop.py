@@ -25,6 +25,7 @@ Now and then:
 
   hop whoami           who is logged in right now (asks the API)
   hop usage [name]     5-hour and 7-day usage per account (asks the API, remembers the answer)
+  hop next [names]     hop to the login with the most 5-hour room; names set the list once
   hop run <name> [..]  claude as that account in this terminal only; the rest goes to claude
   hop renew [name]     refresh the saved tokens (all of them, or just one)
   hop save <name>      save a login you did by hand, under a name
@@ -40,6 +41,8 @@ Flags:
   --verify             check saved tokens against the API
   --long               more columns in the listing
   --json               machine-readable output
+  --probe              usage: when the usage API will not answer, read the figures
+                       through Claude Code (one one-word reply as that account)
   --no-color           plain text
   -V, --version        print the version
 
@@ -64,7 +67,8 @@ into one, instead of one surprise logout per account per month.
 
 Environment: CLAUDE_CONFIG_DIR (default ~/.claude), CLAUDE_ACCOUNTS_DIR
 (default <config>/accounts), CLAUDE_HOP_BACKEND (auto|file|keychain),
-CLAUDE_HOP_OFFLINE=1 to never call the API.
+CLAUDE_HOP_OFFLINE=1 to never call the API, CLAUDE_HOP_PROBE_MODEL (default
+haiku) for --probe.
 """
 
 from __future__ import annotations
@@ -83,7 +87,7 @@ import sys
 import textwrap
 import time
 
-VERSION = "1.7.2"
+VERSION = "1.8.0"
 PROG = "claudehop"
 
 
@@ -1086,15 +1090,37 @@ def sync_live_before_switch(live: dict) -> str | None:
 # How much of each account's 5-hour and 7-day allowance is spent, from the same
 # endpoint Claude Code's own /usage reads. It budgets requests from clients
 # that are not Claude Code, and a throttled token is blocked for a long time
-# (a Retry-After of about 25 minutes was seen), so this runs only when asked,
-# keeps the last good reading on disk, and never asks again before the server's
-# Retry-After has passed. The cache holds percentages and times, no tokens.
+# (a Retry-After of 25 minutes to an hour has been seen), so this runs only when
+# asked, keeps the last good reading on disk, and never asks again before the
+# server's Retry-After has passed. The cache holds percentages and times, no
+# tokens.
+#
+# Three things keep a reading possible for every account, not only the live one:
+#
+# * An idle account's access token ages out 8 hours after it was last renewed,
+#   and the endpoint will not take it. So usage renews it first, as `renew`
+#   would, unless it is the live login or open in a `run` session; those two
+#   are renewed by the Claude Code that holds them.
+# * A window whose reset time has passed is empty again, which needs nobody to
+#   be asked.
+# * --probe reads the figures through Claude Code itself when the endpoint will
+#   not answer: one one-word reply from the smallest model, sent as that
+#   account, whose response carries the same rate-limit figures every reply
+#   does. That spends a sliver of the account's allowance, and starts its
+#   5-hour window if none was running, so it only happens when asked (and when
+#   `hop next` needs it to choose).
+#
+# Team and Enterprise seats report no `seven_day` window. Their weekly caps are
+# rows in the reply's `limits` list instead, one per meter and often scoped to
+# a single model, so those rows are kept as well.
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 USAGE_CACHE = os.path.join(ACCOUNTS, ".usage-cache")
 USAGE_FRESH_S = 60  # a reading this young is shown again without asking
 USAGE_THROTTLE_DEFAULT_S = 600  # when a 429 names no Retry-After
 USAGE_THROTTLE_MAX_S = 3600
+PROBE_MODEL = env("CLAUDE_HOP_PROBE_MODEL") or "haiku"
+PROBE_TIMEOUT_S = float(env("CLAUDE_HOP_PROBE_TIMEOUT") or 60.0)
 
 
 def api_usage(token: str, timeout: float = API_TIMEOUT) -> tuple[int, dict, float | None]:
@@ -1143,6 +1169,130 @@ def parse_usage(body: dict) -> dict:
     return out
 
 
+def parse_limits(body: dict) -> list | None:
+    """The reply's `limits` rows: [{"kind", "group", "pct", "resetsAt", "scope"}, ...].
+
+    `kind` is the server's name for the meter (session, weekly_all,
+    weekly_scoped) and `scope` the model or surface a scoped one covers, such as
+    "Fable". None when the reply carries no list at all, as a server from
+    before these rows does.
+    """
+    rows = (body or {}).get("limits")
+    if not isinstance(rows, list):
+        return None
+    out = []
+    for row in rows:
+        pct = row.get("percent") if isinstance(row, dict) else None
+        if not isinstance(pct, (int, float)) or isinstance(pct, bool):
+            continue
+        scope = row.get("scope") if isinstance(row.get("scope"), dict) else {}
+        label = next(
+            (str(part["display_name"]) for part in (scope.get("model"), scope.get("surface"))
+             if isinstance(part, dict) and part.get("display_name")),
+            None,
+        )
+        resets = row.get("resets_at")
+        out.append({
+            "kind": str(row.get("kind") or ""),
+            "group": str(row.get("group") or ""),
+            "pct": float(pct),
+            "resetsAt": resets if isinstance(resets, str) else None,
+            "scope": label,
+        })
+    return out
+
+
+def parse_probe(stream: str) -> dict | None:
+    """The windows in Claude Code's stream-json output, in parse_usage's shape.
+
+    They come from its rate_limit_event, where utilization is a fraction and a
+    reset is an epoch second. A refused request names the window that refused
+    it, and that one is full whatever else the event says. None when there is
+    no event to read.
+    """
+    from datetime import datetime, timezone
+
+    limit_info = None
+    for line in stream.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(msg, dict) and msg.get("type") == "rate_limit_event":
+            limit_info = msg.get("rate_limit_info") or limit_info
+    if not isinstance(limit_info, dict):
+        return None
+
+    def iso(ts) -> str | None:
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+            return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+        return None
+
+    out = {}
+    for key, win in (limit_info.get("unifiedWindows") or {}).items():
+        pct = win.get("utilization") if isinstance(win, dict) else None
+        if isinstance(pct, (int, float)) and not isinstance(pct, bool):
+            out[key] = {"pct": round(float(pct) * 100, 1), "resetsAt": iso(win.get("resetsAt"))}
+    kind = limit_info.get("rateLimitType")
+    if limit_info.get("status") == "rejected" and isinstance(kind, str) and kind:
+        out[kind] = {
+            "pct": 100.0,
+            "resetsAt": iso(limit_info.get("resetsAt")) or (out.get(kind) or {}).get("resetsAt"),
+        }
+    return out or None
+
+
+def probe_usage(token: str) -> tuple[dict | None, str]:
+    """(windows, why not) from one one-word Claude Code request made as this token.
+
+    Claude Code runs in a throwaway config home and takes the access token from
+    CLAUDE_CODE_OAUTH_TOKEN. In that mode it never refreshes or writes a login,
+    so no saved copy can be rotated out from under anybody. No tools, MCP
+    servers, settings or transcript. Overrides in your own environment (an API
+    key, a gateway URL, a provider switch) are left out, so the request really
+    is this account's.
+    """
+    import tempfile
+
+    claude = shutil.which("claude")
+    if not claude:
+        return None, "`claude` is not on your PATH"
+    home = tempfile.mkdtemp(prefix=f"{PROG}-probe-")
+    child_env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE_"))}
+    child_env.update(
+        CLAUDE_CONFIG_DIR=home,
+        CLAUDE_CODE_OAUTH_TOKEN=token,
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
+    )
+    try:
+        proc = subprocess.run(
+            [claude, "-p", "--model", PROBE_MODEL, "--output-format", "stream-json", "--verbose",
+             "--strict-mcp-config", "--no-session-persistence", "--tools", ""],
+            input="Reply with the single word ok",
+            capture_output=True, text=True, timeout=PROBE_TIMEOUT_S, env=child_env, cwd=home,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"claude did not answer within {PROBE_TIMEOUT_S:.0f}s"
+    except OSError as e:
+        return None, f"could not start claude: {e}"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    got = parse_probe(proc.stdout)
+    if got:
+        return got, ""
+    said = ""
+    for line in proc.stdout.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(msg, dict) and msg.get("type") == "result":
+            said = str(msg.get("result") or msg.get("subtype") or "")
+    said = said or ((proc.stderr or "").strip().splitlines() or [""])[-1]
+    said = " ".join(said.split())[:80]
+    return None, f"claude gave no rate-limit figures ({said or f'exit {proc.returncode}'})"
+
+
 def seconds_until(iso: str | None) -> float | None:
     if not iso or not isinstance(iso, str):
         return None
@@ -1171,6 +1321,24 @@ def countdown(seconds: float) -> str:
     return f"{minutes}m"
 
 
+def window_now(win: dict | None) -> dict | None:
+    """A saved window as it stands now. Once its reset time has passed it is
+    empty again, whatever it read when it was fetched; `was` keeps that figure."""
+    if not win:
+        return None
+    left = seconds_until(win.get("resetsAt"))
+    if left is not None and left <= 0:
+        return {"pct": 0.0, "resetsAt": None, "was": win.get("pct")}
+    return dict(win)
+
+
+def weekly_limit(entry: dict) -> dict | None:
+    """The fullest weekly meter in a reading's `limits` rows, or None."""
+    rows = [r for r in entry.get("limits") or [] if r.get("group") == "weekly"
+            or str(r.get("kind", "")).startswith("weekly")]
+    return max(rows, key=lambda r: r["pct"]) if rows else None
+
+
 def read_usage_cache() -> dict:
     try:
         with open(USAGE_CACHE) as f:
@@ -1180,65 +1348,114 @@ def read_usage_cache() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def usage_row(entry: dict, block: dict, now: float, renew_hint: str = "") -> dict:
+def renew_idle(name: str, block: dict, cur: str | None) -> tuple[dict, str]:
+    """Renew an idle account's aged-out access token so its usage can be read.
+
+    Returns (block to read with, what to say if it was not renewed). The live
+    login and an account open in a `run` session are left to the Claude Code
+    that holds them: rotating a token under it would sign it out.
+    """
+    if name == cur:
+        return block, "Claude Code renews it on its next call"
+    if OFFLINE or not block.get("accessToken") or not expired(block):
+        return block, ""
+    if run_pids(name):
+        return block, "the `run` session that has it open renews it"
+    if capture_run_login(name):  # a session that has ended may hold the newer login
+        block = load_profile(name).get(OAUTH_KEY) or block
+        if not expired(block):
+            return block, ""
+    left = refresh_left(block)
+    if left is not None and left <= 0:
+        return block, f"the login has expired - `{PROG} add {name}` to sign in again"
+    fresh, ident, err = refresh_block(block)
+    if not fresh:
+        return block, f"renewing it failed: {err}"
+    save_profile(name, fresh, ident)  # the old refresh token died with that call
+    return fresh, ""
+
+
+def usage_row(
+    entry: dict, block: dict, now: float, renew_hint: str = "", probe: bool = False
+) -> dict:
     """One account's reading: the cached entry, refreshed if it is allowed and due.
 
-    Returns the entry to keep (windows, fetchedAt, throttledUntil) plus a `note`
-    that says why a reading is old or missing.
+    Returns the entry to keep (windows, limits, fetchedAt, source, throttledUntil)
+    plus a `note` that says why a reading is old or missing. With probe=True, a
+    reading the endpoint would not give is taken through Claude Code instead.
     """
     entry = dict(entry or {})
+    entry.pop("note", None)
     if OFFLINE:
         entry["note"] = "offline mode" if entry.get("windows") else "offline mode, nothing cached"
         return entry
-    until = entry.get("throttledUntil") or 0
-    if until > now:
-        entry["note"] = f"throttled by the server, ask again in {countdown(until - now)}"
-        return entry
     fetched = entry.get("fetchedAt") or 0
-    if entry.get("windows") and now - fetched < USAGE_FRESH_S:
+    if entry.get("windows") is not None and now - fetched < USAGE_FRESH_S:
         return entry
     tok = block.get("accessToken")
     if not tok:
         entry["note"] = "no saved login"
-    elif expired(block):
+        return entry
+    if expired(block):
         entry["note"] = f"access token aged out; {renew_hint}" if renew_hint else "access token aged out"
+        return entry
+    until = entry.get("throttledUntil") or 0
+    if until > now:
+        note = f"throttled by the server, ask again in {countdown(until - now)}"
     else:
         status, body, retry = api_usage(tok)
         if status == 200:
-            entry["windows"] = parse_usage(body)
-            entry["fetchedAt"] = now
+            entry.update(windows=parse_usage(body), fetchedAt=now, source="usage")
+            limits = parse_limits(body)
+            if limits is not None:
+                entry.update(limits=limits, limitsAt=now)
             entry.pop("throttledUntil", None)
-        elif status == 429:
+            return entry
+        if status == 429:
             wait = min(retry if retry is not None else USAGE_THROTTLE_DEFAULT_S, USAGE_THROTTLE_MAX_S)
             entry["throttledUntil"] = now + wait
-            entry["note"] = f"throttled by the server, ask again in {countdown(wait)}"
-        elif status in (401, 403):
+            note = f"throttled by the server, ask again in {countdown(wait)}"
+        elif status == 401:
             entry["note"] = "the server rejected this token"
+            return entry  # nothing else will take it either
+        elif status == 403:
+            note = "the server rejected this token"
         else:
-            entry["note"] = f"http {status}" if status else "could not reach the server"
+            note = f"http {status}" if status else "could not reach the server"
+    if probe:
+        got, why = probe_usage(tok)
+        if got:
+            entry.update(windows=got, fetchedAt=now, source="probe")
+            return entry
+        note += f"; probe: {why}"
+    entry["note"] = note
     return entry
 
 
-def cmd_usage(name=None, as_json=False, **_):
-    """Where each account stands against its 5-hour and 7-day limits."""
-    names = list_profiles()
-    if name:
-        load_profile(name)  # dies with the usual message if there is no such account
-        names = [name]
-    if not names:
-        die(f"no saved accounts. Add one with `{PROG} add <name>`.")
-    profiles = {n: load_profile(n) for n in names}
+def read_usage(names: list[str], probe: bool = False) -> tuple[dict, str | None]:
+    """Readings for these accounts, as fresh as the server allows, saved to the
+    cache. Returns ({name: entry with its note}, the live account's name)."""
     cur = active_name()
+    profiles = {n: load_profile(n) for n in names}
     blocks = effective_blocks(profiles, cur, live_oauth())
+    hints = {}
+    for n in names:
+        blocks[n], hints[n] = renew_idle(n, blocks[n], cur)
+        if not hints[n] and blocks[n].get("accessToken") and expired(blocks[n]):
+            hints[n] = f"`{PROG} renew {n}` refreshes it"
     cache = read_usage_cache()
     now = time.time()
 
-    def renew_hint(n: str) -> str:
-        if n == cur:
-            return "Claude Code renews it on its next call"
-        return f"`{PROG} renew {n}` refreshes it"
+    def one(n: str) -> dict:
+        return usage_row(cache.get(n), blocks[n], now, hints[n], probe)
 
-    rows = {n: usage_row(cache.get(n), blocks[n], now, renew_hint(n)) for n in names}
+    if len(names) > 1 and not OFFLINE:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(6, len(names))) as pool:
+            rows = dict(zip(names, pool.map(one, names)))
+    else:
+        rows = {n: one(n) for n in names}
     for n, row in rows.items():
         cache[n] = {k: v for k, v in row.items() if k != "note"}
     cache = {n: v for n, v in cache.items() if n in list_profiles()}
@@ -1247,6 +1464,40 @@ def cmd_usage(name=None, as_json=False, **_):
         write_json_secure(USAGE_CACHE, cache)
     except OSError:
         pass  # a cache we cannot write only costs the next run a request
+    return rows, cur
+
+
+def window_cell(win: dict | None, label: str = "") -> str:
+    win = window_now(win)
+    if not win:
+        return "-"
+    text = f"{win['pct']:.0f}%" + (f" {label}" if label else "")
+    if win.get("was") is not None:
+        return f"{text}  reset, was {win['was']:.0f}%"
+    left = seconds_until(win.get("resetsAt"))
+    return text + (f"  resets {countdown(left)}" if left and left > 0 else "")
+
+
+def week_cell(entry: dict) -> str:
+    """The 7-day column: the all-model window when there is one, else the fullest
+    weekly meter from `limits` with the model it covers."""
+    windows = entry.get("windows") or {}
+    if windows.get("seven_day"):
+        return window_cell(windows["seven_day"])
+    row = weekly_limit(entry)
+    return window_cell(row, row.get("scope") or "") if row else "-"
+
+
+def cmd_usage(name=None, as_json=False, probe=False, **_):
+    """Where each account stands against its 5-hour and 7-day limits."""
+    names = list_profiles()
+    if name:
+        load_profile(name)  # dies with the usual message if there is no such account
+        names = [name]
+    if not names:
+        die(f"no saved accounts. Add one with `{PROG} add <name>`.")
+    rows, cur = read_usage(names, probe=probe)
+    now = time.time()
 
     if as_json:
         print(
@@ -1257,7 +1508,10 @@ def cmd_usage(name=None, as_json=False, **_):
                             "name": n,
                             "active": n == cur,
                             "windows": rows[n].get("windows") or {},
+                            "limits": rows[n].get("limits"),
                             "fetchedAt": rows[n].get("fetchedAt"),
+                            "limitsAt": rows[n].get("limitsAt"),
+                            "source": rows[n].get("source"),
                             "throttledUntil": rows[n].get("throttledUntil"),
                             "note": rows[n].get("note"),
                         }
@@ -1269,25 +1523,132 @@ def cmd_usage(name=None, as_json=False, **_):
         )
         return
 
-    def cell(row: dict, key: str) -> str:
-        win = (row.get("windows") or {}).get(key)
-        if not win:
-            return "-"
-        left = seconds_until(win.get("resetsAt"))
-        return f"{win['pct']:.0f}%" + (f"  resets {countdown(left)}" if left and left > 0 else "")
-
     table, lit = [], set()
     for i, n in enumerate(names):
         row = rows[n]
-        note = row.get("note") or ""
-        age = now - row["fetchedAt"] if row.get("windows") and row.get("fetchedAt") else 0
+        notes = [row["note"]] if row.get("note") else []
+        if row.get("source") == "probe":
+            notes.insert(0, "read through claude")
+        age = now - row["fetchedAt"] if row.get("windows") is not None and row.get("fetchedAt") else 0
         if age > USAGE_FRESH_S:
-            note = f"{note}; " if note else ""
-            note += f"last reading {countdown(age)} ago"
-        table.append(("*" if n == cur else " ", n, cell(row, "five_hour"), cell(row, "seven_day"), note))
+            notes.append(f"last reading {countdown(age)} ago")
+        windows = row.get("windows") or {}
+        table.append(("*" if n == cur else " ", n, window_cell(windows.get("five_hour")),
+                      week_cell(row), "; ".join(notes)))
         if n == cur:
             lit.add(i)
     print_table(("", "NAME", "5 HOURS", "7 DAYS", "NOTE"), table, lit)
+
+
+# ----------------------------------------------------------------------- next
+#
+# `hop next` hops to whichever saved login has the most of its 5-hour window
+# left. It is a command you run, never something that runs by itself: a hop
+# moves every open session on its next message, so it should happen when you
+# decide it should. Which logins it may choose from is a list you give it once
+# (`hop next a b c`); it is kept in <accounts>/next and used from then on, so
+# logins you keep for other work are never picked by accident.
+
+NEXT_LIST = os.path.join(ACCOUNTS, "next")
+NEXT_CURRENT_S = 300  # a reading older than this does not count as knowing
+NEXT_FULL_PCT = 95.0  # a 5-hour window this full is not worth hopping into
+
+
+def read_next_list() -> list[str]:
+    try:
+        with open(NEXT_LIST) as f:
+            return [ln.strip() for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
+    except OSError:
+        return []
+
+
+def write_next_list(names: list[str]):
+    profiles_dir()
+    tmp = f"{NEXT_LIST}.tmp-{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("".join(n + "\n" for n in names))
+    os.replace(tmp, NEXT_LIST)
+
+
+def standing(entry: dict, now: float) -> dict:
+    """What `next` knows about one login: {"known", "pct", "left", "full", "why"}.
+
+    `pct` is the 5-hour use now and `left` the seconds until that window resets
+    (None when it has not started). A login is full when its 5-hour window is at
+    NEXT_FULL_PCT or its all-model weekly limit is used up; a weekly meter scoped
+    to one model does not stop the others, so it does not count.
+    """
+    fetched = entry.get("fetchedAt") or 0
+    if entry.get("windows") is None or now - fetched > NEXT_CURRENT_S:
+        why = entry.get("note") or "no current reading"
+        return {"known": False, "why": why}
+    windows = entry["windows"]
+    five = window_now(windows.get("five_hour")) or {"pct": 0.0, "resetsAt": None}
+    pct = five["pct"]
+    left = seconds_until(five.get("resetsAt"))
+    weeks = [window_now(windows.get("seven_day"))]
+    weeks += [window_now(r) for r in entry.get("limits") or [] if r.get("kind") == "weekly_all"]
+    week_full = next((w for w in weeks if w and w["pct"] >= 100), None)
+    if week_full:
+        wl = seconds_until(week_full.get("resetsAt"))
+        why = "weekly limit reached" + (f", resets {countdown(wl)}" if wl else "")
+        return {"known": True, "pct": pct, "left": wl, "full": True, "why": why}
+    if pct >= NEXT_FULL_PCT:
+        why = f"5h {pct:.0f}%" + (f", resets {countdown(left)}" if left else "")
+        return {"known": True, "pct": pct, "left": left, "full": True, "why": why}
+    why = f"5h {pct:.0f}%" + (f", resets {countdown(left)}" if left and left > 0 else ", window not started")
+    return {"known": True, "pct": pct, "left": left if left and left > 0 else None, "full": False, "why": why}
+
+
+def cmd_next(names=None, yes=False, no_sync=False, **_):
+    """Hop to the login in the `next` list with the most 5-hour room left."""
+    names = list(names or [])
+    saved = list_profiles()
+    if names:
+        missing = [n for n in names if n not in saved]
+        if missing:
+            die(f"not saved: {', '.join(missing)}. Saved: {', '.join(saved) or 'none'}", USAGE_EXIT)
+        names = list(dict.fromkeys(names))
+        write_next_list(names)
+        info(f"{DIM}`{PROG} next` now chooses among {', '.join(names)}{OFF}")
+    else:
+        listed = read_next_list()
+        names = [n for n in listed if n in saved]
+        if not names:
+            die(
+                f"tell `{PROG} next` which logins it may choose from, once: "
+                f"`{PROG} next <name> <name> ...`. Saved: {', '.join(saved) or 'none'}",
+                USAGE_EXIT,
+            )
+    if len(names) < 2:
+        die(f"`{PROG} next` needs at least two logins to choose between.", USAGE_EXIT)
+
+    cur = active_name()
+    others = [n for n in names if n != cur]
+    rows, _ = read_usage(others, probe=True)
+    now = time.time()
+    known = {n: standing(rows[n], now) for n in others}
+    room = [n for n in others if known[n]["known"] and not known[n]["full"]]
+    # Most room first. Within ten points, the window that resets soonest goes
+    # first: what it has left is lost at the reset if nobody uses it.
+    room.sort(key=lambda n: (int(known[n]["pct"] // 10), known[n]["left"] or float("inf")))
+
+    width = max(len(n) for n in others)
+    for n in others:
+        mark = GREEN if room and n == room[0] else DIM
+        info(f"  {mark}{pad(n, width)}{OFF}  {known[n]['why']}")
+    if not room:
+        resets = [(known[n]["left"], n) for n in others if known[n]["known"] and known[n]["left"]]
+        unknown = [n for n in others if not known[n]["known"]]
+        msg = "no login in the list has room"
+        if resets:
+            left, first = min(resets)
+            msg += f"; {first} is the first to reset, in {countdown(left)}"
+        if unknown:
+            msg += f"; no current reading for {', '.join(unknown)}"
+        die(msg)
+    cmd_use(name=room[0], yes=yes, no_sync=no_sync)
 
 
 # ------------------------------------------------------------------ run sessions
@@ -1499,6 +1860,11 @@ def capture_run_login(name: str) -> bool:
     prof = peek_profile(name)
     old = prof.get(OAUTH_KEY) or {}
     if new.get("accessToken") == old.get("accessToken"):
+        return False
+    # The profile can be the newer one: `renew` and `usage` renew a saved login
+    # without touching its run home. Copying the home's login back then would
+    # put a refresh token the server has already retired into the profile.
+    if _issued_later(old, new):
         return False
     window_new = new.get("refreshTokenExpiresAt") or 0
     window_old = old.get("refreshTokenExpiresAt") or 0
@@ -1732,19 +2098,38 @@ def cmd_pick(yes=False, no_sync=False, verify=False, as_json=False, long_=False,
     profiles = {n: load_profile(n) for n in names}
     cur = active_name()
     prov = active_provider()
+    # Which one to pick is mostly a question of who has room left, so show the
+    # last 5-hour reading `hop usage` saved. Read from the cache, never asked
+    # for: the picker has to come up at once.
+    cache = read_usage_cache()
+    now = time.time()
+
+    def last_5h(n: str) -> str:
+        entry = cache.get(n) or {}
+        if entry.get("windows") is None or not entry.get("fetchedAt"):
+            return "-"
+        # A reply without the window means nothing has been used in it.
+        win = window_now((entry["windows"] or {}).get("five_hour")) or {"pct": 0.0}
+        if win.get("was") is not None:
+            return "0% (reset)"
+        cell, age = f"{win['pct']:.0f}%", now - entry["fetchedAt"]
+        return cell if age < 900 else f"{cell} ({countdown(age)} ago)"
+
+    show_5h = any(cache.get(n) for n in names)
     rows = [
         (f"{i}. *" if n == cur and not prov else f"{i}.", n,
          profiles[n].get("email") or "?", profiles[n].get("plan") or "?")
+        + ((last_5h(n),) if show_5h else ())
         for i, n in enumerate(names, 1)
     ]
     rows += [
         (f"{len(names) + j}. *" if p == prov else f"{len(names) + j}.", p,
-         f"runs {provider_command(p) or '?'}", "provider")
+         f"runs {provider_command(p) or '?'}", "provider") + (("",) if show_5h else ())
         for j, p in enumerate(provs, 1)
     ]
     lit = {i for i, n in enumerate(names) if n == cur and not prov}
     lit |= {len(names) + j for j, p in enumerate(provs) if p == prov}
-    print_table(("", "NAME", "EMAIL", "PLAN"), rows, lit)
+    print_table(("", "NAME", "EMAIL", "PLAN") + (("5H USED",) if show_5h else ()), rows, lit)
     try:
         answer = input(f"\nhop to which? [1-{len(choices)}, Enter to stay] ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -2497,7 +2882,7 @@ def cmd_shell_init(**_):
                 COMPREPLY=($(compgen -W "{verbs} $names" -- "$cur"))
               else
                 case "$prev" in
-                  use|switch|rm|remove|delete|rename|mv|save|add|new|login|renew|refresh|usage|run)
+                  use|switch|rm|remove|delete|rename|mv|save|add|new|login|renew|refresh|usage|next|run)
                     COMPREPLY=($(compgen -W "$names" -- "$cur")) ;;
                   *)
                     COMPREPLY=($(compgen -W "{flags}" -- "$cur")) ;;
@@ -2522,6 +2907,7 @@ COMMANDS = {
     "rm": cmd_rm, "remove": cmd_rm, "delete": cmd_rm,
     "rename": cmd_rename, "mv": cmd_rename,
     "usage": cmd_usage,
+    "next": cmd_next,
     "run": cmd_run,
     "provider": cmd_provider, "providers": cmd_provider,
     "off": cmd_off,
@@ -2542,6 +2928,7 @@ FLAGS = {
     "--json": "as_json",
     "--fix": "fix",
     "--no-color": "no_color",
+    "--probe": "probe",
 }
 
 
@@ -2555,7 +2942,7 @@ def main(argv: list[str]):
         return
 
     flags = {"yes": False, "verify": False, "long_": False, "no_sync": False,
-             "as_json": False, "fix": False, "no_color": False}
+             "as_json": False, "fix": False, "no_color": False, "probe": False}
     args: list[str] = []
     only_positional = False
     for a in argv:
@@ -2581,6 +2968,10 @@ def main(argv: list[str]):
         return
 
     cmd = args[0] if args else "list"
+    if cmd == "next":  # takes any number of names
+        with lock():
+            cmd_next(names=args[1:], **flags)
+        return
     fn = COMMANDS.get(cmd)
     if not fn:
         # `claudehop work` is a shortcut for `claudehop use work`

@@ -16,8 +16,8 @@ does not mention may still exist. If a row is wrong, open an issue and it will b
 | Time to start (`--version`) | 22 ms | 71 ms | not measured |
 | A different account per terminal | yes, `hop run` | yes, `cswap run` | yes, `clauth start` |
 | Chat history across accounts | shared by default | per account, unless `--share-history` | browse and resume across accounts |
-| Usage and reset times | `hop usage`, when you ask | live dashboard | live monitor |
-| Switches by itself near a limit | no | yes | yes |
+| Usage and reset times | `hop usage`, when you ask, for every account | live dashboard | live monitor |
+| Switches by itself near a limit | no; `hop next` picks the login with room when you run it | yes | yes |
 | Bedrock, Vertex or a gateway | yes, hop to it like an account | API keys only | custom API endpoints |
 | Login about to expire | warns 14 days ahead and plans one sitting | quarantines it once the token has died | reports an expired login |
 | Needs a background process | never | optional | optional daemon |
@@ -61,7 +61,7 @@ the experiments after an upgrade; the method is in
 
 claude-swap and clauth switch for you before a rate limit, show live usage, have a terminal
 interface and run on Windows. claude-swap also has far more tests: 2,183 test functions against
-claudehop's 236 checks (different units, so read this as scale, not a ratio). claudehop has no
+claudehop's 279 checks (different units, so read this as scale, not a ratio). claudehop has no
 terminal interface, no automatic switching and no Windows support. Automatic switching is
 deliberately absent: a hop moves every open session on its next message, so it should never
 happen unasked.

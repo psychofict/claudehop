@@ -852,6 +852,8 @@ unset CLAUDE_HOP_LOCK_WAIT
 # clients that are not Claude Code, so the command asks only when run, remembers
 # the last good reading, and waits out a Retry-After.
 usage_run() {  # usage_run <python that defines `responses`> [json] [name]
+  # RENEWED=<token> makes a renewal succeed with that token; otherwise it fails.
+  # PROBE=1 passes --probe. Neither ever reaches the network.
   HOP="$HOP" RESPONSES="$1" AS_JSON="${2:-}" ONLY="${3:-}" python3 - <<'PY'
 import importlib.machinery, importlib.util, os, json, datetime
 loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
@@ -862,13 +864,22 @@ def at(**kw):
     return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(**kw)).isoformat()
 ns = {"at": at}
 exec(os.environ["RESPONSES"], ns)
-calls = []
+calls, renewals = [], []
 def fake(tok, timeout=0):
     calls.append(tok)
     return ns["responses"][tok]
+def fake_renew(blk, timeout=0):
+    renewals.append(blk.get("refreshToken"))
+    tok = os.environ.get("RENEWED")
+    if not tok:
+        return None, {}, "stub: renewal refused"
+    return dict(blk, accessToken=tok, refreshToken="r-" + tok, expiresAt=99999999999999), {}, ""
 ca.api_usage = fake
-ca.cmd_usage(name=os.environ["ONLY"] or None, as_json=bool(os.environ["AS_JSON"]))
+ca.refresh_block = fake_renew
+ca.cmd_usage(name=os.environ["ONLY"] or None, as_json=bool(os.environ["AS_JSON"]),
+             probe=os.environ.get("PROBE") == "1")
 print("CALLS=%d" % len(calls))
+print("RENEWALS=%s" % ",".join(renewals))
 PY
 }
 calls_of() { printf '%s' "$1" | sed -n 's/^CALLS=//p'; }
@@ -922,7 +933,7 @@ is "...and a 429 without Retry-After still backs off" "$(calls_of "$(usage_run "
 seed; rm -f "$UC"; poke beta expiresAt "1"
 out="$(usage_run "$two_ok")"
 is "an aged-out token is not sent" "$(calls_of "$out")" "1"
-printf '%s' "$out" | grep -E "beta" | grep -q "aged out" && ok "...and the row says what to do" || bad "...and the row says what to do" "$out"
+printf '%s' "$out" | grep -E "beta" | grep -q "aged out.*renewing it failed" && ok "...and the row says renewing it failed" || bad "...and the row says renewing it failed" "$out"
 
 seed; rm -f "$UC"
 out="$(usage_run 'responses = {"tok-A": (401, {}, None), "tok-B": (0, {"error": "x"}, None)}')"
@@ -931,7 +942,7 @@ printf '%s' "$out" | grep -E "alpha" | grep -q "rejected" && printf '%s' "$out" 
 
 seed; rm -f "$UC"
 out="$(usage_run "$two_ok" json)"
-printf '%s' "$out" | sed '/^CALLS=/d' | python3 -c "
+printf '%s' "$out" | sed '/^CALLS=/d; /^RENEWALS=/d' | python3 -c "
 import json,sys
 d=json.load(sys.stdin)['accounts']
 a=[x for x in d if x['name']=='alpha'][0]
@@ -949,6 +960,302 @@ seed; rm -f "$UC"
 out="$(USAGE_OFFLINE=1 usage_run "$two_ok")"
 is "offline mode makes no request" "$(calls_of "$out")" "0"
 printf '%s' "$out" | grep -q "offline" && ok "...and says so" || bad "...and says so" "$out"
+seed
+
+# --- 21b. usage reads idle accounts too ------------------------------------------
+# An idle account's access token ages out 8 hours after its last renewal, and
+# the endpoint will not take it, so usage renews it first. Never the live login
+# and never one a `run` session holds: rotating a token under either signs it out.
+renewals_of() {  # the renewals a usage_run made; "missing" if it never got that far
+  printf '%s' "$1" | grep -q '^RENEWALS=' || { echo missing; return; }
+  printf '%s' "$1" | sed -n 's/^RENEWALS=//p'
+}
+renewed_ok='responses = {"tok-A": (200, {"five_hour": {"utilization": 10, "resets_at": at(hours=1)}}, None),
+  "tok-B2": (200, {"five_hour": {"utilization": 33, "resets_at": at(hours=3)}}, None)}'
+seed; rm -f "$UC"; poke beta expiresAt "1"
+out="$(RENEWED=tok-B2 usage_run "$renewed_ok")"
+is "an idle account's aged-out token is renewed first" "$(renewals_of "$out")" "r-beta"
+printf '%s' "$out" | grep -E "beta" | grep -q "33%" && ok "...and its usage is read with the new one" || bad "...and its usage is read with the new one" "$out"
+is "...which is saved, since the old refresh token is now dead" "$(saved_token beta)" "tok-B2"
+is "the live login is never renewed by usage" "$(live_token)" "tok-A"
+
+seed; rm -f "$UC"; poke alpha expiresAt "1"
+out="$(RENEWED=tok-X usage_run "$two_ok")"
+is "...not even when its access token has aged out" "$(renewals_of "$out")" ""
+printf '%s' "$out" | grep -E "alpha" | grep -q "Claude Code renews it" && ok "...and the row says who will" || bad "...and the row says who will" "$out"
+
+seed; rm -f "$UC"; poke beta expiresAt "1"
+mkdir -p "$CLAUDE_ACCOUNTS_DIR/.run/beta/.hop-pids"; : > "$CLAUDE_ACCOUNTS_DIR/.run/beta/.hop-pids/$$"
+out="$(RENEWED=tok-X usage_run "$two_ok")"
+is "an account open in a run session is not renewed" "$(renewals_of "$out")" ""
+printf '%s' "$out" | grep -E "beta" | grep -q "run. session" && ok "...and the row says why" || bad "...and the row says why" "$out"
+rm -rf "$CLAUDE_ACCOUNTS_DIR/.run"
+
+# Team seats have no seven_day window; their weekly caps are rows in `limits`.
+team='responses = {
+  "tok-A": (200, {"five_hour": {"utilization": 100.0, "resets_at": at(hours=2)}, "seven_day": None,
+                  "limits": [{"kind": "session", "group": "session", "percent": 100, "severity": "critical",
+                              "resets_at": at(hours=2), "scope": None, "is_active": True},
+                             {"kind": "weekly_scoped", "group": "weekly", "percent": 29, "severity": "normal",
+                              "resets_at": at(days=6, hours=1), "scope": {"model": {"id": None, "display_name": "Fable"},
+                              "surface": None}, "is_active": False},
+                             {"kind": "odd", "percent": "n/a"}, "junk"]}, None),
+  "tok-B": (200, {"five_hour": None, "seven_day": None}, None)}'
+seed; rm -f "$UC"
+out="$(usage_run "$team")"
+printf '%s' "$out" | grep -E "alpha" | grep -q "100%.*29% Fable  resets 6d" \
+  && ok "a weekly meter scoped to one model shows in the 7-day column" || bad "a weekly meter scoped to one model shows in the 7-day column" "$out"
+printf '%s' "$out" | grep -E "beta" | grep -qE "^ +beta +- +-$" \
+  && ok "...and a reply with no windows leaves the row empty, with no error" || bad "...and a reply with no windows leaves the row empty, with no error" "$out"
+out="$(usage_run "$team" json)"
+printf '%s' "$out" | sed '/^CALLS=/d; /^RENEWALS=/d' | python3 -c "
+import json,sys
+a=[x for x in json.load(sys.stdin)['accounts'] if x['name']=='alpha'][0]
+l=a['limits']; assert [r['kind'] for r in l]==['session','weekly_scoped'], l
+assert l[1]['scope']=='Fable' and l[1]['pct']==29.0 and a['source']=='usage' and a['limitsAt'], a
+print('ok')" 2>/dev/null | grep -q ok && ok "--json carries the limits rows, and skips what is not one" || bad "--json carries the limits rows, and skips what is not one" "$out"
+
+# a window whose reset time has passed is empty again
+python3 -c "
+import json,os
+p=os.environ['CLAUDE_ACCOUNTS_DIR']+'/.usage-cache'; d=json.load(open(p))
+d['alpha']['windows']['five_hour']['resetsAt']='2020-01-01T00:00:00+00:00'; d['alpha']['fetchedAt']-=600
+d['alpha']['throttledUntil']=d['alpha']['fetchedAt']+10**6
+json.dump(d,open(p,'w'))"
+out="$(usage_run "$team")"
+printf '%s' "$out" | grep -E "alpha" | grep -q "0%  reset, was 100%" \
+  && ok "a window past its reset reads as empty, with what it was" || bad "a window past its reset reads as empty, with what it was" "$out"
+
+# --- 21c. usage --probe: the figures through Claude Code itself ------------------
+# The stand-in claude prints what Claude Code's stream-json prints and records
+# the environment it was given.
+PB="$TMP/probebin"; PO="$TMP/probe-out"; mkdir -p "$PB" "$PO"
+cat > "$PB/claude" <<'STUB'
+#!/usr/bin/env python3
+import json, os, sys, time
+out = os.environ["PROBE_OUT"]
+json.dump({"argv": sys.argv[1:], "token": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"),
+           "home": os.environ.get("CLAUDE_CONFIG_DIR"), "apikey": os.environ.get("ANTHROPIC_API_KEY"),
+           "stdin": sys.stdin.read()}, open(os.path.join(out, "seen-" + os.environ["CLAUDE_CODE_OAUTH_TOKEN"]), "w"))
+mode = os.environ.get("PROBE_MODE", "ok")
+if mode == "fail":
+    print(json.dumps({"type": "result", "is_error": True, "result": "Invalid API key"}))
+    sys.exit(1)
+now = int(time.time())
+info = {"status": "allowed", "resetsAt": now + 3600, "rateLimitType": "five_hour",
+        "unifiedWindows": {"five_hour": {"utilization": 0.37, "resetsAt": now + 3600}}}
+if mode == "rejected":
+    info = {"status": "rejected", "resetsAt": now + 7200, "rateLimitType": "five_hour", "unifiedWindows": {}}
+print(json.dumps({"type": "system", "subtype": "init"}))
+print(json.dumps({"type": "rate_limit_event", "rate_limit_info": info}))
+print(json.dumps({"type": "result", "is_error": mode == "rejected", "result": "ok"}))
+STUB
+chmod +x "$PB/claude"
+probe_run() {  # probe_run <command...>: with the stand-in claude first on the PATH
+  ( export PATH="$PB:$PATH" PROBE_OUT="$PO" PROBE=1 ANTHROPIC_API_KEY=sk-should-not-pass; "$@" )
+}
+seen() { jget "$PO/seen-$1" "$2"; }
+
+seed; rm -f "$UC" "${PO:?}"/seen-*
+out="$(probe_run usage_run "$throttled")"
+printf '%s' "$out" | grep -E "alpha" | grep -q "37%  resets .*read through claude" \
+  && ok "--probe reads a throttled account through claude" || bad "--probe reads a throttled account through claude" "$out"
+is "...as that account, from its access token" "$(seen tok-B token)" "tok-B"
+is "...with no API key from this shell" "$(seen tok-A apikey)" "None"
+home="$(seen tok-A home)"
+{ [ -n "$home" ] && [ "$home" != "$TMP" ] && [ ! -e "$home" ]; } \
+  && ok "...in a throwaway config home that is gone afterwards" || bad "...in a throwaway config home that is gone afterwards" "$home"
+seen tok-A argv | grep -q "'--tools', ''" && ok "...with no tools" || bad "...with no tools" "$(seen tok-A argv)"
+is "...and the endpoint is asked once each, as before" "$(calls_of "$out")" "2"
+out="$(probe_run usage_run "$throttled")"
+is "a probe reading counts as fresh for a minute" "$(calls_of "$out")" "0"
+python3 -c "
+import json,os
+p=os.environ['CLAUDE_ACCOUNTS_DIR']+'/.usage-cache'; d=json.load(open(p))
+assert d['alpha']['source']=='probe' and d['alpha']['throttledUntil'] and d['alpha']['windows']['five_hour']['pct']==37.0
+print('ok')" 2>/dev/null | grep -q ok && ok "...and is cached as a probe reading, the throttle kept" || bad "...and is cached as a probe reading, the throttle kept" "$(cat "$UC")"
+
+seed; rm -f "$UC"
+out="$(PROBE_MODE=rejected probe_run usage_run "$throttled")"
+printf '%s' "$out" | grep -E "alpha" | grep -q "100%  resets 1h5[89]m" \
+  && ok "a probe the server refused marks that window full" || bad "a probe the server refused marks that window full" "$out"
+seed; rm -f "$UC"
+out="$(PROBE_MODE=fail probe_run usage_run "$throttled")"
+printf '%s' "$out" | grep -E "alpha" | grep -q "throttled.*probe: claude gave no rate-limit figures (Invalid API key)" \
+  && ok "a failed probe says what claude said" || bad "a failed probe says what claude said" "$out"
+seed; rm -f "$UC" "${PO:?}"/seen-*
+probe_run usage_run "$two_ok" >/dev/null
+[ -z "$(ls "$PO")" ] && ok "no probe when the endpoint answers" || bad "no probe when the endpoint answers" "$(ls "$PO")"
+seed; rm -f "$UC"
+
+# --- 21d. next: hop to the login with the most room ---------------------------------
+next_run() {  # next_run <python that defines `responses`> [names...]
+  local resp="$1"; shift
+  HOP="$HOP" RESPONSES="$resp" NAMES="$*" python3 - <<'PY' 2>&1
+import importlib.machinery, importlib.util, os, datetime
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+ca.OFFLINE = False
+def at(**kw):
+    return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(**kw)).isoformat()
+ns = {"at": at}
+exec(os.environ["RESPONSES"], ns)
+asked = []
+def fake(tok, timeout=0):
+    asked.append(tok)
+    return ns["responses"].get(tok, (429, {}, 600.0))
+ca.api_usage = fake
+ca.probe_usage = lambda tok: (ns.get("probes", {}).get(tok), "stub: no probe")
+ca.refresh_block = lambda blk, timeout=0: (None, {}, "stub")
+try:
+    ca.cmd_next(names=os.environ["NAMES"].split(), yes=True)
+except SystemExit as e:
+    print("EXIT=%s" % e.code)
+print("ASKED=%s" % ",".join(sorted(asked)))
+PY
+}
+add_gamma() {
+  python3 - <<'PY'
+import json, os
+d = os.environ['CLAUDE_ACCOUNTS_DIR']
+json.dump({"name": "gamma", "email": "gamma@x.com", "plan": "team", "accountUuid": "uuid-G",
+           "claudeAiOauth": {"accessToken": "tok-G", "refreshToken": "r-gamma", "expiresAt": 99999999999999}},
+          open(f"{d}/gamma.json", "w"))
+PY
+  chmod 600 "$CLAUDE_ACCOUNTS_DIR/gamma.json"
+}
+three='responses = {
+  "tok-B": (200, {"five_hour": {"utilization": 80, "resets_at": at(hours=1)}}, None),
+  "tok-G": (200, {"five_hour": {"utilization": 12, "resets_at": at(hours=4)}}, None)}'
+
+seed; rm -f "$UC"; add_gamma
+out="$(next_run "$three")"
+printf '%s' "$out" | grep -q "EXIT=2" && printf '%s' "$out" | grep -q "which logins it may choose from" \
+  && ok "next asks for its list the first time" || bad "next asks for its list the first time" "$out"
+is "...and hops nowhere" "$(live_token)" "tok-A"
+out="$(next_run "$three" alpha beta gamma)"
+is "next hops to the login with the most room" "$(live_token)" "tok-G"
+printf '%s' "$out" | grep -qE "beta +5h 80%" && ok "...and says where the others stand" || bad "...and says where the others stand" "$out"
+printf '%s' "$out" | grep -q "ASKED=tok-B,tok-G" && ok "...asking only about the others, not the live one" || bad "...asking only about the others, not the live one" "$out"
+is "...and remembers the list" "$(tr '\n' ' ' < "$CLAUDE_ACCOUNTS_DIR/next")" "alpha beta gamma "
+"$HOP" list 2>/dev/null | grep -qw "next" && bad "the list file is not an account" "listed" || ok "the list file is not an account"
+
+rm -f "$UC"
+out="$(next_run "$three")"
+is "next with no names uses the remembered list" "$(live_token)" "tok-B"
+printf '%s' "$out" | grep -q "gamma  " && bad "...leaving out the login it is on" "$out" || ok "...leaving out the login it is on"
+
+seed; rm -f "$UC"; add_gamma
+close='responses = {
+  "tok-B": (200, {"five_hour": {"utilization": 46, "resets_at": at(minutes=40)}}, None),
+  "tok-G": (200, {"five_hour": {"utilization": 41, "resets_at": at(hours=4)}}, None)}'
+next_run "$close" alpha beta gamma >/dev/null
+is "within ten points, the window that resets first goes first" "$(live_token)" "tok-B"
+
+# An old reading is not a reading: gamma read 5% two hours ago, and nothing can read it now.
+seed; rm -f "$UC"; add_gamma
+python3 -c "
+import json, os, time
+now = time.time()
+json.dump({'gamma': {'windows': {'five_hour': {'pct': 5.0, 'resetsAt': None}}, 'fetchedAt': now - 7200,
+                     'throttledUntil': now + 1800}},
+          open(os.environ['CLAUDE_ACCOUNTS_DIR'] + '/.usage-cache', 'w'))"
+stale='responses = {"tok-B": (200, {"five_hour": {"utilization": 60, "resets_at": at(hours=1)}}, None)}'
+next_run "$stale" alpha beta gamma >/dev/null
+is "a reading from two hours ago is not trusted" "$(live_token)" "tok-B"
+
+seed; rm -f "$UC"; add_gamma
+full='responses = {
+  "tok-B": (200, {"five_hour": {"utilization": 97, "resets_at": at(hours=1, minutes=5)}}, None),
+  "tok-G": (200, {"five_hour": {"utilization": 3, "resets_at": at(hours=4)},
+                  "limits": [{"kind": "weekly_all", "group": "weekly", "percent": 100, "resets_at": at(days=2)}]}, None)}'
+out="$(next_run "$full" alpha beta gamma)"
+printf '%s' "$out" | grep -q "EXIT=1" && printf '%s' "$out" | grep -q "beta is the first to reset, in 1h0[45]m" \
+  && ok "when every login is full, next stays and says when one frees up" || bad "when every login is full, next stays and says when one frees up" "$out"
+printf '%s' "$out" | grep -qE "gamma +weekly limit reached" && ok "...counting an all-model weekly limit as full" || bad "...counting an all-model weekly limit as full" "$out"
+is "...and hops nowhere" "$(live_token)" "tok-A"
+
+seed; rm -f "$UC"; add_gamma
+unknown='responses = {"tok-B": (200, {"five_hour": {"utilization": 60, "resets_at": at(hours=1)}}, None)}
+probes = {}'
+out="$(next_run "$unknown" alpha beta gamma)"
+is "a login with no current reading is not chosen blind" "$(live_token)" "tok-B"
+printf '%s' "$out" | grep -qE "gamma +throttled.*probe: stub" && ok "...and the reason is shown" || bad "...and the reason is shown" "$out"
+seed; rm -f "$UC"; add_gamma
+probed='responses = {"tok-B": (200, {"five_hour": {"utilization": 60, "resets_at": at(hours=1)}}, None)}
+probes = {"tok-G": {"five_hour": {"pct": 5.0, "resetsAt": at(hours=2)}}}'
+next_run "$probed" alpha beta gamma >/dev/null
+is "...but a throttled one is read through claude, and can win" "$(live_token)" "tok-G"
+out="$(next_run "$three" alpha nosuch)"
+printf '%s' "$out" | grep -q "EXIT=2" && printf '%s' "$out" | grep -q "not saved: nosuch" \
+  && ok "next refuses a name that is not saved" || bad "next refuses a name that is not saved" "$out"
+seed; rm -f "$UC" "$CLAUDE_ACCOUNTS_DIR/next" "$CLAUDE_ACCOUNTS_DIR/gamma.json"
+
+# --- 21e. the picker shows the last 5-hour reading --------------------------------
+seed; rm -f "$UC"
+usage_run "$two_ok" >/dev/null
+pick_out="$(HOP="$HOP" python3 - <<'PY' 2>&1
+import builtins, importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+real = sys.stdout
+seen = []
+class Tty:
+    def isatty(self):
+        return True
+    def write(self, s):
+        seen.append(s)
+        return len(s)
+    def flush(self):
+        pass
+sys.stdin = sys.stdout = Tty()
+builtins.input = lambda prompt="": ""
+def no_api(*a, **k):
+    raise AssertionError("the picker asked the API")
+ca.api_usage = no_api
+try:
+    ca.cmd_pick()
+finally:
+    real.write("".join(seen))
+PY
+)"
+printf '%s' "$pick_out" | grep -q "5H USED" && printf '%s' "$pick_out" | grep -E "beta" | grep -q "7%" \
+  && ok "the picker shows each login's last 5-hour reading" || bad "the picker shows each login's last 5-hour reading" "$pick_out"
+printf '%s' "$pick_out" | grep -q "asked the API" && bad "...from the cache, without asking" "$pick_out" || ok "...from the cache, without asking"
+rm -f "$UC"
+
+# --- 21f. renew after a run session keeps the newer login --------------------------
+# A run home keeps the login its session last used. Once `renew` (or `usage`) has
+# renewed the saved copy, the home's copy is older and its refresh token retired.
+# 1.7.2 copied it back over the profile on the next renew, which signed it out.
+seed
+out="$(HOP="$HOP" python3 - <<'PY' 2>&1
+import importlib.machinery, importlib.util, os, time
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+now = int(time.time() * 1000)
+old = {"accessToken": "tok-B-old", "refreshToken": "r-B-old", "expiresAt": now - 16 * 3600_000,
+       "refreshTokenExpiresAt": now + 20 * 86400_000}
+ca.save_profile("beta", old, {})
+ca.prepare_run_home("beta", old)
+ca.save_profile("beta", dict(old, accessToken="tok-B-new", refreshToken="r-B-new", expiresAt=now - 1000), {})
+sent = []
+ca.OFFLINE = False
+ca.refresh_block = lambda blk, timeout=0: (sent.append(blk["refreshToken"]), (None, {}, "stub"))[1]
+try:
+    ca.cmd_renew(name="beta")
+except SystemExit:
+    pass
+print("sent:", sent)
+print("kept:", ca.peek_profile("beta")["claudeAiOauth"]["refreshToken"])
+PY
+)"
+printf '%s' "$out" | grep -q "sent: \['r-B-new'\]" && printf '%s' "$out" | grep -q "kept: r-B-new" \
+  && ok "renew keeps a profile that is newer than its run home's login" || bad "renew keeps a profile that is newer than its run home's login" "$out"
+rm -rf "$CLAUDE_ACCOUNTS_DIR/.run"
 seed
 
 # --- 22. run: one terminal on its own account -----------------------------------

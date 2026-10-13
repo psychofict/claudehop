@@ -3,6 +3,46 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [1.8.0] — 2026-10-13
+
+With five or more accounts, `hop usage` could read only one or two of them most of the
+time, so choosing where to hop was guesswork. This release makes a reading possible for
+every account, and adds a command that uses it.
+
+### Added
+
+- **`hop next`** hops to the login with the most 5-hour room left, from a list you give it
+  once (`hop next a b c`, kept in `accounts/next`). It skips logins that are full, reads any
+  login it has no current figure for, and when none has room it stays and says which one
+  frees up first. You run it; nothing hops on its own.
+- **`hop usage --probe`** reads an account's figures through Claude Code itself when the
+  usage endpoint will not answer: one one-word `claude -p` reply from the smallest model,
+  sent as that account from a throwaway config home, whose response carries the same
+  rate-limit figures every reply does. It never touches a saved login. It spends a small
+  part of that account's allowance and starts its 5-hour window if none was running, so it
+  runs only when asked.
+- **Weekly meters for Team and Enterprise seats.** These seats have no all-model 7-day
+  window; their weekly caps come as separate meters, often for one model. The 7-day column
+  now shows the fullest one (`29% Fable`), and `--json` carries all of them under `limits`,
+  with `limitsAt` and the reading's `source`.
+- The bare `hop` picker shows each login's last 5-hour reading, from the cache and with no
+  network call.
+
+### Changed
+
+- **`hop usage` renews an idle account's aged-out access token before asking.** An access
+  token lasts 8 hours, so a login renewed once a day could be read for only a third of it.
+  The live login and accounts open in a `hop run` session are still left alone.
+- A window whose reset time has passed reads `0%  reset, was 98%` instead of its old figure.
+
+### Fixed
+
+- **`hop renew` after a `hop run` session could sign an account out.** The run home keeps
+  the login its session last used. Once the saved copy had been renewed since, the next
+  `renew` copied the run home's older login back over it and sent its retired refresh
+  token, which the server refuses. A run home's login is now saved back only when it is the
+  newer one.
+
 ## [1.7.2] — 2026-10-07
 
 ### Changed

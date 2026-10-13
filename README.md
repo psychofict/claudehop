@@ -42,9 +42,9 @@ usage pool. Neither opens a browser.
 
 ```
 $ hop
-      NAME  EMAIL           PLAN
-1.    home  me@gmail.com    max
-2. *  work  me@company.com  team
+      NAME  EMAIL           PLAN  5H USED
+1.    home  me@gmail.com    max   12%
+2. *  work  me@company.com  team  96%
 
 hop to which? [1-2, Enter to stay] 1
 switched to home (me@gmail.com, max)
@@ -107,7 +107,8 @@ the others do better is on the
 | `hop <name>` | move every open `claude` to that account's login |
 | `hop run <name> [claude args]` | claude as that account in this terminal only |
 | `hop add <name>` · `hop save <name>` | log in as a new account · save the login you have |
-| `hop usage` | 5-hour and 7-day usage per account, when each resets |
+| `hop usage` | 5-hour and 7-day usage per account, when each resets; `--probe` when the API is throttled |
+| `hop next` | hop to the login with the most 5-hour room, from a list you set once |
 | `hop provider <name> <command>` · `hop off` | Bedrock, Vertex or a gateway, hopped to like an account |
 | `hop doctor` | check the setup and the next re-login date; `--fix` repairs what it can |
 | `hop renew` · `hop whoami` · `hop rm` · `hop rename` | keep the saved logins current and tidy |
@@ -124,14 +125,22 @@ Linux only for now.
 
 **Usage.** `hop usage` reads the usage endpoint that Claude Code itself calls. It limits other
 clients, so `hop usage` asks only when you run it, remembers the last good reading, and waits out the
-server's `Retry-After`. Nothing polls in the background.
+server's `Retry-After`. It renews an idle account's aged-out access token first, so every account can
+be read, not only the one you are on. When the endpoint still will not answer, `--probe` takes the
+figures from one one-word `claude -p` reply sent as that account. Nothing polls in the background.
 
 ```
 $ hop usage
-   NAME   5 HOURS            7 DAYS             NOTE
-   home   98%  resets 24m    61%  resets 4d23h
-*  work   42%  resets 2h14m  18%  resets 3d4h
+   NAME   5 HOURS                 7 DAYS               NOTE
+   home   0%  reset, was 98%      61%  resets 4d23h
+*  work   42%  resets 2h14m       18%  resets 3d4h
+   team   71%  resets 3h02m       29% Fable  resets 6d  read through claude
 ```
+
+**The login with room.** `hop next a b c` hops to whichever of those logins has the most of its
+5-hour window left, and remembers the list, so later a bare `hop next` does it. A login it has no
+current figure for is read first, so it never picks on an old reading. It is a command you run, not
+something that switches by itself.
 
 ## Before you hop
 
@@ -164,7 +173,8 @@ new `claude` commands through it. Your saved logins are never touched.
 
 *Where are my tokens, and where do they go?* In `~/.claude/accounts/`, a folder only you can open,
 with each file private to you. Tokens go only to Anthropic: `api.anthropic.com` to learn who you are
-and your usage, and `platform.claude.com` to renew one.
+and your usage, and `platform.claude.com` to renew one. `hop usage --probe` and `hop next` also hand an
+access token to your own `claude` command, in its environment, for one request.
 [SECURITY.md](https://github.com/psychofict/claudehop/blob/master/SECURITY.md) has the threat model.
 
 *How does it work, and how do I know it is right?* claudehop keeps one saved copy of each login and
@@ -172,7 +182,7 @@ swaps the live one in and out while holding Claude Code's own refresh lock. Ever
 Code's behaviour was measured and names the version it was measured on; the experiments and the
 30-day login window are in
 [docs/how-it-works.md](https://github.com/psychofict/claudehop/blob/master/docs/how-it-works.md). The
-roughly 240 checks in `test/test-switch.sh` run against fake logins with no network.
+roughly 280 checks in `test/test-switch.sh` run against fake logins with no network.
 
 *How does it differ from claude-swap or clauth?* It is smaller, starts faster, plans your monthly
 re-login and has no background process. They add automatic switching, a terminal interface and

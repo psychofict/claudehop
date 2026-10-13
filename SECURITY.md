@@ -20,9 +20,18 @@ What the tool does about that:
   `GET https://api.anthropic.com/api/oauth/profile` (email and plan),
   `GET https://api.anthropic.com/api/oauth/usage` (`hop usage`), and
   `POST https://platform.claude.com/v1/oauth/token` (renewing a token, from
-  `renew` or a hop to an account whose access token has aged out).
+  `renew`, from `usage` for an idle account whose access token has aged out, or
+  a hop to such an account).
   Requests say they come from claudehop; the tool does not pose as Claude Code.
   `CLAUDE_HOP_OFFLINE=1` disables all of them.
+- `hop usage --probe` and `hop next` can run your own `claude` command once per
+  account, to read the rate-limit figures Claude Code reports with every reply.
+  The account's access token goes to that process in its environment
+  (`CLAUDE_CODE_OAUTH_TOKEN`), never on its command line; in that mode Claude
+  Code does not refresh or store a login. Its config home is a private
+  temporary folder that is deleted afterwards. While it runs, other processes
+  of your own user can read its environment, as they can read the credential
+  files themselves.
 - `accounts/.usage-cache` holds usage percentages and reset times, never a token.
 - `hop run` keeps a copy of an account's login in `accounts/.run/<name>/` (folder `700`,
   login `600`). `rm` deletes it, unlinking and never following the links that point at your
