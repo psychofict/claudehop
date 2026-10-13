@@ -184,6 +184,32 @@ doesn't hold up:
 Swapping the real credential block avoids all three and matches what Claude Code already does to
 itself. `--probe` borrows the variable for a single request only, with a normal access token.
 
+## Reading claudehop's state from another tool
+
+A status bar, a tray widget or a script can follow claudehop without calling it, by reading a few
+files in the accounts folder (`~/.claude/accounts`, or `CLAUDE_ACCOUNTS_DIR`). None of these holds a
+token. Read them and leave them alone; only claudehop writes them.
+
+| File | What it holds |
+|---|---|
+| `active` | The account whose login is live, on one line. claudehop replaces the file whenever it changes the live login (`use`, `next`, `save`, `add`, `rename`), so its modification time is when that last happened. |
+| `provider` | The provider new sessions run through, while one is on; `<name>.provider` holds its command. |
+| `.usage-cache` | The last reading of every account, as `hop usage --json` reports it: `windows`, `limits`, `fetchedAt`, `limitsAt`, `source` (`usage` or `probe`) and `throttledUntil`, keyed by account name. |
+| `next` | The logins `hop next` may choose from, one per line. |
+| `.run/<name>/.hop-pids/<pid>` | One file per open `hop run` session of that account, holding the process's start time from `/proc`, so a reused pid can be told apart. |
+| `.run/<name>/sessions/<pid>.json` | Written by Claude Code, not claudehop: the session id of each conversation open in that account's `hop run` session. |
+| `.lock` | While a command holds claudehop's lock (2.0.0 and later), its pid, start time and command, separated by spaces. |
+
+Each `<name>.json` is a saved login with its tokens. A tool that only wants the email and plan can
+read those two keys, but must never copy the tokens anywhere: a refresh token is single-use, and a
+second copy that gets renewed signs the account out. To read usage fresh, run `hop usage --json`
+rather than calling the endpoint with a saved token yourself, so the renewal rules above still
+apply.
+
+[Claude Usage Widget & Token Tracker](https://github.com/StaticB1/claude_ai_usage_widget) is one tool
+that does this. It uses the `active` file's modification time, and the session ids under `.run`, to
+file each Claude Code turn under the account that made it.
+
 ## Things that catch people out
 
 - `/login` opens your default browser, which is already signed in as somebody. Paste the URL into a

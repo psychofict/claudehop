@@ -3,6 +3,16 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Documentation
+
+- "How it works" lists the files another tool can read to follow claudehop without calling it
+  (`active`, `provider`, `.usage-cache`, `next`, the `hop run` session records and the lock
+  holder), what each holds, and the one rule: never copy a saved token.
+- The README points to Claude Usage Widget & Token Tracker, a Linux tray widget and dashboard that
+  reads those files to show every account's usage and split tokens by account.
+
 ## [2.0.0] — 2026-10-13
 
 A fix for an open `hop` menu holding up every other `hop` command, which could stop a script

@@ -158,6 +158,16 @@ most of its 5-hour window left. It reads a login first when it has no current fi
 chooses on an old one. When none has room it stays put and says which frees up first. It is a
 command you run, never something that switches by itself.
 
+### In your system tray
+
+[Claude Usage Widget & Token Tracker](https://github.com/StaticB1/claude_ai_usage_widget) (Linux,
+2.2.0 and later) picks up claudehop when it finds it. Its tray icon and dashboard name the live
+account, show every account's last 5-hour and weekly reading from claudehop's cache, count `hop run`
+terminals, point at the login `hop next` would choose, and file each turn under the account that
+made it. Its Read all accounts button runs `hop usage` for you; it never hops. claudehop does not
+need it, and it does not need claudehop. The files it reads are listed in
+[How it works](docs/how-it-works.md#reading-claudehops-state-from-another-tool).
+
 ## Before you hop
 
 - A hop moves every running `claude`, not only new ones. Claude Code reads its login again before
