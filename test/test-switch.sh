@@ -519,6 +519,86 @@ printf '%s' "$out" | grep -qi 'which' \
   || ok "bare hop in a pipe does not prompt"
 is "bare hop in a pipe switches nothing" "$(live_token)" "tok-A"
 
+# An open menu must not hold the lock. On 13 Oct 2026 a picker left open in a
+# terminal from 15:39 held it for an hour, and every hop a script tried in that
+# time waited behind it until it was killed.
+pick_during() {  # pick_during <shell command run while the menu waits> <answer>
+  HOP="$HOP" DURING="$1" ANSWER="$2" python3 - <<'PY' 2>/dev/null
+import builtins, fcntl, importlib.machinery, importlib.util, os, subprocess, sys
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+class Tty:
+    def isatty(self):
+        return True
+    def write(self, s):
+        out.append(s)
+        return len(s)
+    def flush(self):
+        pass
+out, real = [], sys.stdout
+def answer(prompt=""):
+    fd = os.open(os.path.join(os.environ["CLAUDE_ACCOUNTS_DIR"], ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        real.write("LOCK FREE WHILE WAITING\n")
+    except OSError:
+        real.write("LOCK HELD WHILE WAITING\n")
+    os.close(fd)
+    if os.environ["DURING"]:
+        subprocess.run(os.environ["DURING"], shell=True, timeout=10, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return os.environ["ANSWER"]
+sys.stdin = sys.stdout = Tty()
+builtins.input = answer
+try:
+    ca.cmd_pick(yes=True)
+except SystemExit:
+    pass
+real.write("".join(out))
+PY
+}
+
+seed
+out="$(pick_during '' '')"
+printf '%s' "$out" | grep -q 'LOCK FREE WHILE WAITING' \
+  && ok "the picker does not hold the lock while it waits for an answer" \
+  || bad "the picker does not hold the lock while it waits for an answer" "$out"
+
+seed
+out="$(pick_during "\"$HOP\" use beta --yes" beta)"
+is "a hop made while the menu waits goes through" "$(cat "$CLAUDE_ACCOUNTS_DIR/active")" "beta"
+printf '%s' "$out" | grep -q 'already on' \
+  && ok "...and picking that account then says it is already on it" \
+  || bad "...and picking that account then says it is already on it" "$out"
+
+seed
+pick_during "\"$HOP\" use beta --yes" alpha >/dev/null
+is "...picking the one it left hops back to it" "$(live_token)" "tok-A"
+
+# A command left waiting says what it waits for.
+seed
+out="$(HOP="$HOP" python3 - <<'PY' 2>&1
+import importlib.machinery, importlib.util, os, subprocess, sys, time
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+sys.argv = ["claudehop", "usage", "--json"]
+with ca.lock():
+    try:
+        subprocess.run([sys.executable, os.environ["HOP"], "rm", "nobody"], capture_output=True, text=True,
+                       timeout=2, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired as e:
+        print("WAITER:", e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr)
+print("AFTER:", repr(open(os.path.join(os.environ["CLAUDE_ACCOUNTS_DIR"], ".lock")).read()))
+PY
+)"
+printf '%s' "$out" | grep -q "waiting for another .* (pid [0-9]*, \`.*usage --json\`, since [0-9][0-9]:[0-9][0-9])" \
+  && ok "a command waiting on the lock names who holds it" || bad "a command waiting on the lock names who holds it" "$out"
+printf '%s' "$out" | grep -q "AFTER: ''" \
+  && ok "...and the holder's note is cleared when the lock is let go" || bad "...and the holder's note is cleared when the lock is let go" "$out"
+
 # --- 12e. the re-login plan ---------------------------------------------------
 # Refresh windows are ~30 days from the login that issued them and do not slide,
 # so with several accounts the dates drift apart. doctor should name the earliest

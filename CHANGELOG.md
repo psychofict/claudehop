@@ -5,6 +5,20 @@ This project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An open `hop` menu no longer holds up every other `hop` command.** The picker held
+  claudehop's lock from the moment it drew the menu until you answered, so a menu left open
+  in one terminal made every other command that needs the lock wait. That includes
+  `hop usage`, `hop use` and any script that hops for you, for as long as the menu stayed
+  up. The picker now reads without the lock, takes it once you have chosen, and decides from
+  the login that is live at that moment. If something hopped while the menu was open,
+  picking that account says you are already on it.
+- **A command that has to wait says what it is waiting for.** The holder of the lock now
+  writes its pid, start time and command into the lock file, and a waiting command prints
+  `waiting for another claudehop to finish (pid N, `hop usage --json`, since 15:39)...`
+  instead of hanging without a word.
+
 ### Documentation
 
 - The README, the command reference, "How it works", the comparison page and CONTRIBUTING are

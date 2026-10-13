@@ -343,9 +343,22 @@ except ImportError:  # pragma: no cover - POSIX only in practice
 
 
 class _Lock:
+    """claudehop's own lock. The holder writes who it is into the lock file
+    (pid, start time, command), so a command left waiting can say what it is
+    waiting for instead of hanging silently."""
+
     def __init__(self, path: str):
         self.path = path
         self.fd = None
+
+    def holder(self) -> str:
+        try:
+            with open(self.path) as f:
+                pid, started, cmd = f.read().split(" ", 2)
+            since = time.strftime("%H:%M", time.localtime(float(started)))
+            return f" (pid {int(pid)}, `{cmd.strip()}`, since {since})"
+        except (OSError, ValueError):
+            return ""
 
     def __enter__(self):
         if fcntl is None:
@@ -355,12 +368,16 @@ class _Lock:
         try:
             fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            info(f"{DIM}waiting for another {PROG} to finish...{OFF}")
+            info(f"{DIM}waiting for another {PROG} to finish{self.holder()}...{OFF}")
             fcntl.flock(self.fd, fcntl.LOCK_EX)
+        me = f"{os.getpid()} {time.time():.0f} {' '.join([PROG] + sys.argv[1:])}"
+        os.ftruncate(self.fd, 0)
+        os.pwrite(self.fd, me.encode(), 0)
         return self
 
     def __exit__(self, *exc):
         if self.fd is not None:
+            os.ftruncate(self.fd, 0)
             fcntl.flock(self.fd, fcntl.LOCK_UN)
             os.close(self.fd)
             self.fd = None
@@ -2164,7 +2181,9 @@ def cmd_pick(yes=False, no_sync=False, verify=False, as_json=False, long_=False,
     provs = list_providers()
     choices = names + provs
     if len(choices) < 2 or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        cmd_list(verify=verify, as_json=as_json, long_=long_, no_cache=no_cache)
+        # `list --verify` writes what it learns back, so it needs the lock.
+        with lock() if verify else contextlib.nullcontext():
+            cmd_list(verify=verify, as_json=as_json, long_=long_, no_cache=no_cache)
         return
 
     profiles = {n: load_profile(n) for n in names}
@@ -2218,16 +2237,20 @@ def cmd_pick(yes=False, no_sync=False, verify=False, as_json=False, long_=False,
             die(f"'{answer}' is not one of them. Pick a number, or a name.", USAGE_EXIT)
         chosen = hits[0]
 
-    if chosen in provs:
-        if chosen == prov:
+    # The menu was read without the lock, and a menu can stay open for an hour
+    # while something else hops. Take the lock now and decide from what is live.
+    with lock():
+        cur, prov = active_name(), active_provider()
+        if chosen in provs:
+            if chosen == prov:
+                print(f"already on {GREEN}{chosen}{OFF}")
+            else:
+                cmd_provider_on(chosen)
+            return
+        if chosen == cur and not prov:
             print(f"already on {GREEN}{chosen}{OFF}")
-        else:
-            cmd_provider_on(chosen)
-        return
-    if chosen == cur and not prov:
-        print(f"already on {GREEN}{chosen}{OFF}")
-        return
-    cmd_use(name=chosen, yes=yes, no_sync=no_sync)
+            return
+        cmd_use(name=chosen, yes=yes, no_sync=no_sync)
 
 
 def cmd_active(as_json=False, **_):
@@ -3033,10 +3056,11 @@ def main(argv: list[str]):
 
     # Bare `hop` in a terminal asks which account you want; everywhere else -
     # a pipe, --json, a statusline - it stays a plain listing, and takes no lock.
+    # The picker takes the lock itself, only once you have chosen: a menu left
+    # open must not hold up every other claudehop command.
     if not args and not flags["as_json"]:
         if sys.stdin.isatty() and sys.stdout.isatty():
-            with lock():
-                cmd_pick(**flags)
+            cmd_pick(**flags)
         else:
             cmd_list(**flags)
         return
