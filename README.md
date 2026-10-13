@@ -24,8 +24,8 @@
   <a href="#why-claudehop">Why claudehop</a> ·
   <a href="#commands">Commands</a> ·
   <a href="#faq">FAQ</a> ·
-  <a href="https://github.com/psychofict/claudehop/blob/master/CHANGELOG.md">Changelog</a> ·
-  <a href="https://github.com/psychofict/claudehop/blob/master/SECURITY.md">Security</a>
+  <a href="https://github.com/psychofict/claudehop/blob/master/docs/commands.md">Reference</a> ·
+  <a href="https://github.com/psychofict/claudehop/blob/master/CHANGELOG.md">Changelog</a>
 </p>
 
 ---
@@ -39,13 +39,14 @@ hop run home -- --resume    # claude as the home account in this terminal only
 
 `hop` swaps the saved login. `hop run` gives one terminal its own account and leaves your other
 terminals alone, so a Max account in one terminal and a Team seat in another each spend their own
-usage pool. Neither opens a browser.
+usage. Neither opens a browser. Run `hop` on its own and it asks which account you want. Once
+`hop usage` has read your accounts, each one's last 5-hour reading appears beside it:
 
 ```
 $ hop
       NAME  EMAIL           PLAN  5H USED
-1.    home  me@gmail.com    max   12%
-2. *  work  me@company.com  team  96%
+1.    home  me@gmail.com    max   0% (reset)
+2. *  work  me@company.com  team  42%
 
 hop to which? [1-2, Enter to stay] 1
 switched to home (me@gmail.com, max)
@@ -90,14 +91,15 @@ does less than its two big alternatives on purpose, and where they go further th
 | Windows | no | yes | yes |
 
 Size is the tool's own code: claudehop is one file, claude-swap is 24,400 lines and clauth is a
-compiled binary. The cells are short on purpose; the comparison page spells each one out.
+compiled binary. Start-up was timed side by side on 13 October 2026. The comparison page spells
+out each cell and how it was measured.
 
 A switcher holds your refresh tokens, so a tool you can read in one sitting is a security
-property, not only a size. The 30-day login window is the other gap: an account's refresh token dies
+property, not only a size. The 30-day login window is the other gap. An account's refresh token dies
 30 days after the login that issued it, and renewing does not move that date. `hop doctor` works out
 the day the earliest account comes due and tells you to log them all in then, so they share one
-date from then on. Neither alternative's README mentions it. Every number, how it was measured and what
-the others do better is on the
+date from then on. Neither alternative's README mentions it. Every number, how it was measured and
+what the others do better is on the
 [comparison page](https://github.com/psychofict/claudehop/blob/master/docs/comparison.md).
 
 ## Commands
@@ -108,48 +110,60 @@ the others do better is on the
 | `hop <name>` | move every open `claude` to that account's login |
 | `hop run <name> [claude args]` | claude as that account in this terminal only |
 | `hop add <name>` · `hop save <name>` | log in as a new account · save the login you have |
-| `hop usage` | 5-hour and 7-day usage per account, when each resets; `--probe` when the API is throttled |
+| `hop usage` | 5-hour and 7-day usage for every account, and when each resets |
 | `hop next` | hop to the login with the most 5-hour room, from a list you set once |
 | `hop provider <name> <command>` · `hop off` | Bedrock, Vertex or a gateway, hopped to like an account |
 | `hop doctor` | check the setup and the next re-login date; `--fix` repairs what it can |
 | `hop renew` · `hop whoami` · `hop rm` · `hop rename` | keep the saved logins current and tidy |
 
-`--json` on `list`, `whoami`, `active`, `usage` and `doctor` gives output with no secrets in it,
-for scripts and statuslines. The full reference is in
-[docs/commands.md](https://github.com/psychofict/claudehop/blob/master/docs/commands.md).
+`--json` on `list`, `whoami`, `active`, `usage` and `doctor` gives output with no secrets in it, for
+scripts and statuslines. The [command reference](https://github.com/psychofict/claudehop/blob/master/docs/commands.md)
+covers every command, flag and setting.
 
-**One account per terminal.** `hop run work` points `claude` at a config home of its own, so your
-other terminals keep their account. Your settings, skills, agents, plugins, `CLAUDE.md`, prompt
-history and `projects` are linked in, so the session looks like your normal one and conversations
-and memory are shared across accounts. The renewed login is saved back when the session ends.
-Linux only for now.
+### One account per terminal
 
-**Usage.** `hop usage` reads the usage endpoint that Claude Code itself calls. It limits other
-clients, so `hop usage` asks only when you run it, remembers the last good reading, and waits out the
-server's `Retry-After`. It renews an idle account's aged-out access token first, so every account can
-be read, not only the one you are on. When the endpoint still will not answer, `--probe` takes the
-figures from one one-word `claude -p` reply sent as that account. `hop list --verify` similarly remembers
-identity lookups for 60 seconds (never storing tokens). `--no-cache` / `--fresh` bypasses the cache for
-both commands. Nothing polls in the background.
+`hop run work` points `claude` at a config home of its own, so your other terminals keep their
+account. Your settings, skills, agents, plugins, `CLAUDE.md`, prompt history and `projects` are linked
+in, so the session looks like your normal one and conversations and memory are shared across
+accounts. The renewed login is saved back when the session ends. Linux only for now; macOS is
+[issue 1](https://github.com/psychofict/claudehop/issues/1).
+
+### Usage for every account
 
 ```
 $ hop usage
-   NAME   5 HOURS                 7 DAYS               NOTE
-   home   0%  reset, was 98%      61%  resets 4d23h
-*  work   42%  resets 2h14m       18%  resets 3d4h
-   team   71%  resets 3h02m       29% Fable  resets 6d  read through claude
+   NAME  5 HOURS             7 DAYS                  NOTE
+   home  0%  reset, was 98%  61%  resets 4d22h
+   side  71%  resets 3h01m   29% Fable  resets 6d0h  read through claude
+*  work  42%  resets 2h13m   18%  resets 3d3h
 ```
 
-**The login with room.** `hop next a b c` hops to whichever of those logins has the most of its
-5-hour window left, and remembers the list, so later a bare `hop next` does it. A login it has no
-current figure for is read first, so it never picks on an old reading. It is a command you run, not
-something that switches by itself.
+`hop usage` reads the same usage endpoint as Claude Code's own `/usage`. That endpoint limits other
+clients, so `hop usage` asks only when you run it, keeps the last good reading, and waits out the
+server's `Retry-After`. An idle account's access token expires 8 hours after it was last renewed, so
+`hop usage` renews it first and every account can be read, not only the one you are on. A window
+whose reset has passed reads as reset without asking anyone. When the endpoint still will not
+answer, `--probe` reads the figures from one one-word `claude -p` reply sent as that account. Team
+seats have no all-model weekly window; their weekly limits, often for one model, show as `29% Fable`.
+
+### The login with room
+
+```bash
+hop next home work side    # once: the logins it may choose from
+hop next                   # from then on
+```
+
+`hop next` reads every login in its list except the one you are on and hops to the one with the
+most of its 5-hour window left. It reads a login first when it has no current figure, so it never
+chooses on an old one. When none has room it stays put and says which frees up first. It is a
+command you run, never something that switches by itself.
 
 ## Before you hop
 
 - A hop moves every running `claude`, not only new ones. Claude Code reads its login again before
-  each message, so a conversation under way changes account on its next message and starts a new
-  prompt cache. Use `hop run` when you want two accounts at once.
+  each message, on its interactive screen as well as in headless mode, so a conversation under way
+  changes account on its next message. Its prompt cache very likely starts over too (not measured).
+  Use `hop run` when you want two accounts at once.
 - Paste the `/login` URL into a private browser window. Your normal browser is already signed in as
   one of your other accounts and will authorise that one without asking.
 - `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` in the environment override the saved login.
@@ -166,6 +180,16 @@ logged in to the first account, then `hop add work` for the second. After that `
 *Can two terminals use two different accounts at the same time?* Yes, with `hop run <name>`. A plain
 `hop` cannot, because Claude Code reads its login again before every message, so a hop reaches every
 open session. `hop run` gives one terminal its own config home and leaves the others alone.
+
+*Does an open session really change account?* Yes, on its next message. On Linux with Claude Code
+2.1.284, a session sent its next message with the new login about two seconds after a swap in
+headless mode, and 0.9 seconds after it on the interactive screen, in three runs out of three. The
+script that measured it is in the repository, so you can repeat it on a newer version.
+
+*Why does `hop usage` say "throttled"?* The usage endpoint budgets clients other than Claude Code and
+can refuse a token for up to an hour. `hop usage` shows the last reading with its age and does not
+ask again until the server allows it. `hop usage --probe` reads that account through Claude Code
+instead, which costs a sliver of its allowance and starts its 5-hour window if none was running.
 
 *Does switching sign me out of my MCP servers?* No. The credential store holds your MCP logins under
 their own key, and claudehop swaps only the Claude login block.
@@ -184,8 +208,8 @@ access token to your own `claude` command, in its environment, for one request.
 swaps the live one in and out while holding Claude Code's own refresh lock. Every claim about Claude
 Code's behaviour was measured and names the version it was measured on; the experiments and the
 30-day login window are in
-[docs/how-it-works.md](https://github.com/psychofict/claudehop/blob/master/docs/how-it-works.md). The
-roughly 300 checks in `test/test-switch.sh` run against fake logins with no network.
+[how it works](https://github.com/psychofict/claudehop/blob/master/docs/how-it-works.md). About 300
+checks in the test suite run against fake logins with no network.
 
 *How does it differ from claude-swap or clauth?* It is smaller, starts faster, plans your monthly
 re-login and has no background process. They add automatic switching, a terminal interface and
@@ -195,13 +219,14 @@ numbers and the method.
 
 ## Contributing and licence
 
-Issues and pull requests are welcome; start with
-[CONTRIBUTING.md](https://github.com/psychofict/claudehop/blob/master/CONTRIBUTING.md), and see
-[the open issues](https://github.com/psychofict/claudehop/issues) for places to help, including
-macOS support for `hop run`. Ask questions in
-[Discussions](https://github.com/psychofict/claudehop/discussions). If claudehop saved you a
-browser round-trip this morning, a star on [GitHub](https://github.com/psychofict/claudehop)
-helps others find it.
+Issues and pull requests are welcome. Start with
+[CONTRIBUTING.md](https://github.com/psychofict/claudehop/blob/master/CONTRIBUTING.md), then pick up an
+[open issue](https://github.com/psychofict/claudehop/issues): fish shell completion is a good first
+one, and `hop run` on macOS needs someone with a Mac. Ask questions in
+[Discussions](https://github.com/psychofict/claudehop/discussions), and report anything that could
+expose a credential through [SECURITY.md](https://github.com/psychofict/claudehop/blob/master/SECURITY.md).
+If claudehop saved you a browser round-trip this morning, a star on
+[GitHub](https://github.com/psychofict/claudehop) helps others find it.
 
 MIT licence. Not affiliated with, endorsed by, or sponsored by Anthropic. "Claude" and "Claude Code" are
 trademarks of Anthropic, PBC, used here only to say what this works with.

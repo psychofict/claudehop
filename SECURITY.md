@@ -34,6 +34,7 @@ What the tool does about that:
   files themselves.
 - `accounts/.usage-cache` and `accounts/.verify-cache` hold usage and verification
   metadata (times, percentages, email, plan, token state), never a token.
+  `accounts/next` holds account names only.
 - `hop run` keeps a copy of an account's login in `accounts/.run/<name>/` (folder `700`,
   login `600`). `rm` deletes it, unlinking and never following the links that point at your
   own settings and projects.

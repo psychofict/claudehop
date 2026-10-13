@@ -68,8 +68,10 @@ into one, instead of one surprise logout per account per month.
 
 Environment: CLAUDE_CONFIG_DIR (default ~/.claude), CLAUDE_ACCOUNTS_DIR
 (default <config>/accounts), CLAUDE_HOP_BACKEND (auto|file|keychain),
-CLAUDE_HOP_OFFLINE=1 to never call the API, CLAUDE_HOP_PROBE_MODEL (default
-haiku) for --probe.
+CLAUDE_HOP_OFFLINE=1 to never call the API, CLAUDE_HOP_TIMEOUT,
+CLAUDE_HOP_LOCK_WAIT, CLAUDE_HOP_SHARE, CLAUDE_HOP_PROBE_MODEL and
+CLAUDE_HOP_PROBE_TIMEOUT. The reference explains each one:
+https://github.com/psychofict/claudehop/blob/master/docs/commands.md
 """
 
 from __future__ import annotations

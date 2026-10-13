@@ -6,9 +6,10 @@ behind the table in the [README](https://github.com/psychofict/claudehop#readme)
 was measured, and lists where the others go further.
 
 Checked on 2026-10-07 against claudehop 1.7.0, claude-swap 0.26.0 (PyPI) and clauth 0.17.0
-(GitHub release). Size and start-up time re-measured on 2026-10-13 against claudehop 1.9.0 and
-claude-swap 0.26.0, still its latest release. The feature rows come from each project's own README, so a feature a README
-does not mention may still exist. If a row is wrong, open an issue and it will be fixed.
+(GitHub release). Size and start-up time were measured again on 2026-10-13 against claudehop 1.9.0
+and claude-swap 0.26.0, still its latest release. The feature rows come from each project's own
+README, so a feature a README does not mention may still exist. If a row is wrong, open an issue
+and it will be fixed.
 
 | | claudehop | claude-swap | clauth |
 |---|---|---|---|
@@ -17,7 +18,7 @@ does not mention may still exist. If a row is wrong, open an issue and it will b
 | Time to start (`--version`) | 30 ms | 103 ms | not measured |
 | A different account per terminal | yes, `hop run` | yes, `cswap run` | yes, `clauth start` |
 | Chat history across accounts | shared by default | per account, unless `--share-history` | browse and resume across accounts |
-| Usage and reset times | `hop usage`, when you ask, for every account | live dashboard | live monitor |
+| Usage and reset times | `hop usage`, when you ask, for every account; through Claude Code when the endpoint is throttled | live dashboard | live monitor |
 | Switches by itself near a limit | no; `hop next` picks the login with room when you run it | yes | yes |
 | Bedrock, Vertex or a gateway | yes, hop to it like an account | API keys only | custom API endpoints |
 | Login about to expire | warns 14 days ahead and plans one sitting | quarantines it once the token has died | reports an expired login |
@@ -57,8 +58,8 @@ No background process. claudehop runs when you type a command and then exits. No
 nothing listens.
 
 Claims come with a version. Everything the README says about how Claude Code behaves was
-measured in a throwaway home with the network cut off, and names the Claude Code version. Re-run
-the experiments after an upgrade; the method is in
+measured in a throwaway home with the network cut off, and names the Claude Code version. The
+measurements are in [how it works](how-it-works.md), and the method is in
 [CONTRIBUTING](https://github.com/psychofict/claudehop/blob/master/CONTRIBUTING.md).
 
 ## Where the others go further
@@ -79,14 +80,26 @@ uv venv b && uv pip install --python b/bin/python claude-swap
 du -sh a b
 python -c "import importlib.metadata as m; print(len(list(m.distributions())))"   # run with each venv's python, from a neutral directory
 
-# start-up: 15 runs each, take the median
-for i in $(seq 15); do /usr/bin/time -f %e a/bin/hop --version; done
-for i in $(seq 15); do /usr/bin/time -f %e b/bin/cswap --version; done
+# start-up: the two in turn, 40 rounds, median of each, with Python alone as the floor
+python3 - <<'PY'
+import os, statistics, subprocess, time
+cmds = {"python": ["a/bin/python", "-c", "pass"], "hop": ["a/bin/hop", "--version"],
+        "cswap": ["b/bin/cswap", "--version"]}
+env = dict(os.environ, CLAUDE_HOP_OFFLINE="1")
+times = {k: [] for k in cmds}
+for _ in range(40):
+    for k, c in cmds.items():
+        t = time.perf_counter(); subprocess.run(c, capture_output=True, env=env)
+        times[k].append((time.perf_counter() - t) * 1000)
+for k, v in times.items():
+    print(f"{k:7} {statistics.median(v):.1f} ms")
+PY
 
 # the competitor's own code and tests
 wc -l b/lib/python3*/site-packages/claude_swap/*.py | tail -1
 gh api repos/realiti4/claude-swap/tarball/HEAD | tar xz && grep -rhE '^\s*(async )?def test_' */tests | wc -l
 ```
 
-The run in the table used a Linux x86-64 machine, Python 3.12, and an environment variable set to
-a throwaway home so no real account was read.
+The runs in the table used a Linux x86-64 machine and Python 3.12, with `CLAUDE_HOP_OFFLINE=1` and a
+throwaway config folder so no real account was read. Timing the two in turn matters: on a busy
+machine both slow down, and timing them minutes apart compares the load, not the tools.

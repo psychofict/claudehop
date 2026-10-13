@@ -3,6 +3,17 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Documentation
+
+- The README, the command reference, "How it works", the comparison page and CONTRIBUTING are
+  brought up to date with 1.9.0. The reference now covers every command, the settings, the exit
+  status and the fields of `hop usage --json`, and how to install the two helpers in `extras/`.
+  "How it works" gains sections on reading usage and on open sessions following a hop, with
+  the measurements. Every example shows real output.
+- The README no longer states as fact that a hop restarts the prompt cache; that was never measured.
+
 ## [1.9.0] — 2026-10-13
 
 The first release with code from someone other than the maintainer: a cache for
