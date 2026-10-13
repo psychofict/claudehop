@@ -63,7 +63,9 @@ version may change it.
 - A hop moves **every** running `claude`, not only new ones. Claude Code reads
   the credential store again before each message: with a fake endpoint, a
   session sent its next message with the new login about two seconds after the
-  swap (Linux, Claude Code 2.1.284, headless mode). So a conversation already
+  swap (Linux, Claude Code 2.1.284, headless mode), and the interactive screen
+  did the same 0.9 seconds after it, in three runs out of three
+  ([the experiment](experiments/session-follows-swap.py)). So a conversation already
   under way changes account on its next message, moves to the new account's
   usage, and starts a new prompt cache. `claudehop` lists the sessions it finds
   when you hop. It also means one `hop` cannot give two terminals two accounts at

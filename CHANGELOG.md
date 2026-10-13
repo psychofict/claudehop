@@ -16,6 +16,13 @@ This project follows [semantic versioning](https://semver.org/).
 - **`--no-cache` / `--fresh` flag** bypasses the local cache for `hop list --verify` and
   `hop usage`, forcing an immediate query to the API.
 
+### Measured
+
+- **An open interactive session follows a hop on its next message**, as headless mode was
+  already known to (#2). Three runs out of three on Linux with Claude Code 2.1.284: the
+  message sent 0.9 seconds after the swap carried the new login. The experiment is in
+  `docs/experiments/session-follows-swap.py`, so it can be repeated on a newer version.
+
 ## [1.8.0] — 2026-10-13
 
 With five or more accounts, `hop usage` could read only one or two of them most of the
