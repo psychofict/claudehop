@@ -127,7 +127,9 @@ Linux only for now.
 clients, so `hop usage` asks only when you run it, remembers the last good reading, and waits out the
 server's `Retry-After`. It renews an idle account's aged-out access token first, so every account can
 be read, not only the one you are on. When the endpoint still will not answer, `--probe` takes the
-figures from one one-word `claude -p` reply sent as that account. Nothing polls in the background.
+figures from one one-word `claude -p` reply sent as that account. `hop list --verify` similarly remembers
+identity lookups for 60 seconds (never storing tokens). `--no-cache` / `--fresh` bypasses the cache for
+both commands. Nothing polls in the background.
 
 ```
 $ hop usage

@@ -61,7 +61,7 @@ hop usage            # 5-hour and 7-day usage of every account
 hop next             # hop to the login with the most 5-hour room left
 hop renew            # refresh the saved tokens; one name, or all of them
 hop --long           # add token expiry and save dates to the listing
-hop list --verify    # check every saved token against the API
+hop list --verify    # check every saved token against the API (caches for 60s; --no-cache / --fresh to bypass)
 hop rm <name>        # delete a saved account (does not log you out)
 hop rename <a> <b>
 hop doctor           # check the setup; --fix repairs what it can
@@ -123,7 +123,7 @@ seen, and up to an hour since). So `hop usage` asks only when you run it,
 remembers the last good reading in `accounts/.usage-cache` (percentages and
 times, no tokens), and does not ask again until the server's `Retry-After` has
 passed. A throttled row shows the last reading and its age. Nothing polls in the
-background. `hop usage <name>` checks one account, `--json` is for scripts.
+background. `hop usage <name>` checks one account, `--no-cache` / `--fresh` bypasses the cache, `--json` is for scripts.
 
 Three things keep a reading possible for every account, not just the one you
 are on:

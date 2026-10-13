@@ -39,6 +39,7 @@ Flags:
 
   -y, --yes            never prompt; also overrides the running-session stop
   --verify             check saved tokens against the API
+  --no-cache, --fresh  bypass the cache for --verify and usage
   --long               more columns in the listing
   --json               machine-readable output
   --probe              usage: when the usage API will not answer, read the figures
@@ -742,6 +743,34 @@ def identify_many(blocks: dict[str, dict]) -> dict[str, dict]:
     return {n: identity(b) for n, b in blocks.items()}
 
 
+VERIFY_CACHE = os.path.join(ACCOUNTS, ".verify-cache")
+VERIFY_FRESH_S = 60  # a verification this young is shown again without asking
+
+
+def read_verify_cache() -> dict:
+    try:
+        with open(VERIFY_CACHE) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def verify_row(entry: dict | None, now: float, no_cache: bool = False) -> dict | None:
+    """The cached identity entry if fresh and usable, else None.
+
+    The cache holds email, plan, accountUuid, tokenState and fetchedAt - no tokens.
+    """
+    if no_cache or not entry or not isinstance(entry, dict):
+        return None
+    if not entry.get("tokenState"):
+        return None
+    fetched = entry.get("fetchedAt") or 0
+    if now - fetched < VERIFY_FRESH_S:
+        return entry
+    return None
+
+
 def refresh_block(block: dict, timeout: float = API_TIMEOUT) -> tuple[dict | None, dict, str]:
     """Trade a refresh token for a fresh credential block. (block, identity, error).
 
@@ -1376,7 +1405,7 @@ def renew_idle(name: str, block: dict, cur: str | None) -> tuple[dict, str]:
 
 
 def usage_row(
-    entry: dict, block: dict, now: float, renew_hint: str = "", probe: bool = False
+    entry: dict, block: dict, now: float, renew_hint: str = "", probe: bool = False, no_cache: bool = False
 ) -> dict:
     """One account's reading: the cached entry, refreshed if it is allowed and due.
 
@@ -1390,7 +1419,7 @@ def usage_row(
         entry["note"] = "offline mode" if entry.get("windows") else "offline mode, nothing cached"
         return entry
     fetched = entry.get("fetchedAt") or 0
-    if entry.get("windows") is not None and now - fetched < USAGE_FRESH_S:
+    if not no_cache and entry.get("windows") is not None and now - fetched < USAGE_FRESH_S:
         return entry
     tok = block.get("accessToken")
     if not tok:
@@ -1432,7 +1461,7 @@ def usage_row(
     return entry
 
 
-def read_usage(names: list[str], probe: bool = False) -> tuple[dict, str | None]:
+def read_usage(names: list[str], probe: bool = False, no_cache: bool = False) -> tuple[dict, str | None]:
     """Readings for these accounts, as fresh as the server allows, saved to the
     cache. Returns ({name: entry with its note}, the live account's name)."""
     cur = active_name()
@@ -1447,7 +1476,7 @@ def read_usage(names: list[str], probe: bool = False) -> tuple[dict, str | None]
     now = time.time()
 
     def one(n: str) -> dict:
-        return usage_row(cache.get(n), blocks[n], now, hints[n], probe)
+        return usage_row(cache.get(n), blocks[n], now, hints[n], probe, no_cache)
 
     if len(names) > 1 and not OFFLINE:
         from concurrent.futures import ThreadPoolExecutor
@@ -1488,7 +1517,7 @@ def week_cell(entry: dict) -> str:
     return window_cell(row, row.get("scope") or "") if row else "-"
 
 
-def cmd_usage(name=None, as_json=False, probe=False, **_):
+def cmd_usage(name=None, as_json=False, probe=False, no_cache=False, **_):
     """Where each account stands against its 5-hour and 7-day limits."""
     names = list_profiles()
     if name:
@@ -1496,7 +1525,7 @@ def cmd_usage(name=None, as_json=False, probe=False, **_):
         names = [name]
     if not names:
         die(f"no saved accounts. Add one with `{PROG} add <name>`.")
-    rows, cur = read_usage(names, probe=probe)
+    rows, cur = read_usage(names, probe=probe, no_cache=no_cache)
     now = time.time()
 
     if as_json:
@@ -1973,7 +2002,7 @@ def print_table(hdr: tuple, rows: list, highlight=()):
         print((GREEN + line + OFF) if i in highlight else line)
 
 
-def cmd_list(verify=False, as_json=False, long_=False, **_):
+def cmd_list(verify=False, as_json=False, long_=False, no_cache=False, **_):
     names = list_profiles()
     provs = list_providers()
     prov = active_provider()
@@ -1991,14 +2020,43 @@ def cmd_list(verify=False, as_json=False, long_=False, **_):
     blocks = effective_blocks(profiles, cur, live)
     idents: dict[str, dict] = {}
     if verify:
-        idents = identify_many(blocks)
+        cache = {} if no_cache else read_verify_cache()
+        now = time.time()
+        to_fetch: dict[str, dict] = {}
+        for n in names:
+            blk = blocks[n]
+            hit = verify_row(cache.get(n), now, no_cache=no_cache)
+            if hit is not None:
+                idents[n] = hit
+            else:
+                to_fetch[n] = blk
+        if to_fetch:
+            fresh = identify_many(to_fetch)
+            for n, ident in fresh.items():
+                idents[n] = ident
+                if not OFFLINE and ident.get("tokenState"):
+                    cache[n] = {
+                        "email": ident.get("email"),
+                        "plan": ident.get("plan"),
+                        "accountUuid": ident.get("accountUuid"),
+                        "tokenState": ident.get("tokenState"),
+                        "fetchedAt": now,
+                    }
+            if not OFFLINE:
+                cache = {n: v for n, v in cache.items() if n in list_profiles()}
+                try:
+                    profiles_dir()
+                    write_json_secure(VERIFY_CACHE, cache)
+                except OSError:
+                    pass
+
         for n, ident in idents.items():
             if not ident.get("email"):
                 continue
             p = profiles[n]
-            fresh = {k: ident[k] for k in ("email", "plan", "accountUuid") if ident.get(k)}
-            if any(p.get(k) != v for k, v in fresh.items()):
-                p.update(fresh)
+            fresh_meta = {k: ident[k] for k in ("email", "plan", "accountUuid") if ident.get(k)}
+            if any(p.get(k) != v for k, v in fresh_meta.items()):
+                p.update(fresh_meta)
                 write_json_secure(profile_path(n), p)
 
     if as_json:
@@ -2080,7 +2138,7 @@ def cmd_list(verify=False, as_json=False, long_=False, **_):
         )
 
 
-def cmd_pick(yes=False, no_sync=False, verify=False, as_json=False, long_=False, **_):
+def cmd_pick(yes=False, no_sync=False, verify=False, as_json=False, long_=False, no_cache=False, **_):
     """`hop` with nothing after it: show the accounts and offer to switch.
 
     The tool exists to answer one question - which account? - so ask it, instead
@@ -2092,7 +2150,7 @@ def cmd_pick(yes=False, no_sync=False, verify=False, as_json=False, long_=False,
     provs = list_providers()
     choices = names + provs
     if len(choices) < 2 or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        cmd_list(verify=verify, as_json=as_json, long_=long_)
+        cmd_list(verify=verify, as_json=as_json, long_=long_, no_cache=no_cache)
         return
 
     profiles = {n: load_profile(n) for n in names}
@@ -2929,6 +2987,8 @@ FLAGS = {
     "--fix": "fix",
     "--no-color": "no_color",
     "--probe": "probe",
+    "--no-cache": "no_cache",
+    "--fresh": "no_cache",
 }
 
 
@@ -2942,7 +3002,7 @@ def main(argv: list[str]):
         return
 
     flags = {"yes": False, "verify": False, "long_": False, "no_sync": False,
-             "as_json": False, "fix": False, "no_color": False, "probe": False}
+             "as_json": False, "fix": False, "no_color": False, "probe": False, "no_cache": False}
     args: list[str] = []
     only_positional = False
     for a in argv:
