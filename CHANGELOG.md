@@ -3,7 +3,11 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.9.0] — 2026-10-13
+
+The first release with code from someone other than the maintainer: a cache for
+`hop list --verify`, by @AK-Lmn. It also records a measurement that closes a question
+the README had left open.
 
 ### Added
 

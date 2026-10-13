@@ -94,8 +94,14 @@ jobs:
           # Its notes are the version's own section of CHANGELOG.md, so a release made from a
           # tag alone still says what changed. A release written by hand first is left as it is.
           ver="${GITHUB_REF_NAME#v}"
+          # The changelog is wrapped at 90 columns and release notes show every line break,
+          # so wrapped lines are joined back into their paragraph or list item.
           awk -v v="$ver" 'index($0, "## [" v "]") == 1 {on = 1; next} on && /^## \[/ {exit} on {print}' \
-            CHANGELOG.md > notes.md
+            CHANGELOG.md \
+            | awk '/^[[:space:]]*$/ {if (b != "") print b; print ""; b = ""; next}
+                   /^(#|- |\* |[0-9]+\. |\||```)/ {if (b != "") print b; b = $0; next}
+                   {sub(/^[[:space:]]+/, ""); b = (b == "" ? $0 : b " " $0)}
+                   END {if (b != "") print b}' > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
