@@ -77,9 +77,9 @@ does less than its two big alternatives on purpose, and where they go further th
 
 | | claudehop | [claude-swap](https://github.com/realiti4/claude-swap) | [clauth](https://github.com/uwuclxdy/clauth) |
 |---|---|---|---|
-| Size of the tool | 97 KB | 1.2 MB | 15.7 MB |
+| Size of the tool | 118 KB | 1.2 MB | 15.7 MB |
 | Extra packages | none | 10 | none |
-| Time to start | 22 ms | 71 ms | not measured |
+| Time to start | 30 ms | 103 ms | not measured |
 | Account per terminal | yes | yes | yes |
 | History across accounts | shared | opt in | browse |
 | Bedrock, Vertex, gateway | yes | API keys | endpoints |

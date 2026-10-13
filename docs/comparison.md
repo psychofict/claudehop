@@ -6,14 +6,15 @@ behind the table in the [README](https://github.com/psychofict/claudehop#readme)
 was measured, and lists where the others go further.
 
 Checked on 2026-10-07 against claudehop 1.7.0, claude-swap 0.26.0 (PyPI) and clauth 0.17.0
-(GitHub release). The feature rows come from each project's own README, so a feature a README
+(GitHub release). Size and start-up time re-measured on 2026-10-13 against claudehop 1.9.0 and
+claude-swap 0.26.0, still its latest release. The feature rows come from each project's own README, so a feature a README
 does not mention may still exist. If a row is wrong, open an issue and it will be fixed.
 
 | | claudehop | claude-swap | clauth |
 |---|---|---|---|
-| Size of the tool | 97 KB, one file | 1.2 MB, 24,400 lines | 15.7 MB binary |
+| Size of the tool | 118 KB, one file | 1.2 MB, 24,400 lines | 15.7 MB binary |
 | Extra packages to install | none | 10 | none (a binary) |
-| Time to start (`--version`) | 22 ms | 71 ms | not measured |
+| Time to start (`--version`) | 30 ms | 103 ms | not measured |
 | A different account per terminal | yes, `hop run` | yes, `cswap run` | yes, `clauth start` |
 | Chat history across accounts | shared by default | per account, unless `--share-history` | browse and resume across accounts |
 | Usage and reset times | `hop usage`, when you ask, for every account | live dashboard | live monitor |
@@ -27,12 +28,15 @@ does not mention may still exist. If a row is wrong, open an issue and it will b
 ## Where claudehop is ahead
 
 Size you can read. A switcher holds your refresh tokens, so being able to read all of it in one
-sitting is a security property. claudehop is one 97 KB file that uses only the Python standard
+sitting is a security property. claudehop is one 118 KB file that uses only the Python standard
 library. claude-swap is 24,400 lines of its own code plus ten packages, a terminal interface
 framework and what it needs. clauth is a 15.7 MB compiled binary.
 
-Start-up. `--version` takes 22 ms against 71 ms, median of 15 runs on a warm cache. Starting
-Python alone takes 8 ms, so claudehop adds about 14 ms of its own and claude-swap about 63 ms.
+Start-up. `--version` takes 30 ms against 103 ms: the median of 40 rounds on 13 October, each
+tool installed in its own virtual environment and the two timed in turn, on a busy machine (load
+average about 10). Starting Python alone took 12.5 ms, so claudehop adds about 18 ms of its own
+and claude-swap about 90 ms. On 7 October, on a quieter machine, the same comparison gave 22 ms
+against 71 ms.
 
 The 30-day login window. An account's refresh token dies 30 days after the login that issued
 it, and renewing does not move that date. With several accounts the dates drift apart and you
