@@ -3,7 +3,11 @@
 All notable changes to this project are documented here.
 This project follows [semantic versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.0.0] — 2026-10-13
+
+A fix for an open `hop` menu holding up every other `hop` command, which could stop a script
+that hops for you until the menu was closed. There are no breaking changes: the commands,
+flags, saved files and JSON output are the same as in 1.9.0.
 
 ### Fixed
 
