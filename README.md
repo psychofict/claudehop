@@ -16,6 +16,7 @@
   <a href="https://github.com/psychofict/claudehop/blob/master/LICENSE"><img src="https://img.shields.io/badge/licence-MIT-FC5F00.svg" alt="Licence: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-1D1009.svg" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/dependencies-none-1D1009.svg" alt="No dependencies">
+  <a href="https://scorecard.dev/viewer/?uri=github.com/psychofict/claudehop"><img src="https://api.scorecard.dev/projects/github.com/psychofict/claudehop/badge" alt="OpenSSF Scorecard"></a>
 </p>
 
 <p align="center">
@@ -184,7 +185,7 @@ swaps the live one in and out while holding Claude Code's own refresh lock. Ever
 Code's behaviour was measured and names the version it was measured on; the experiments and the
 30-day login window are in
 [docs/how-it-works.md](https://github.com/psychofict/claudehop/blob/master/docs/how-it-works.md). The
-roughly 280 checks in `test/test-switch.sh` run against fake logins with no network.
+roughly 300 checks in `test/test-switch.sh` run against fake logins with no network.
 
 *How does it differ from claude-swap or clauth?* It is smaller, starts faster, plans your monthly
 re-login and has no background process. They add automatic switching, a terminal interface and

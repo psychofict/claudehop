@@ -61,7 +61,7 @@ the experiments after an upgrade; the method is in
 
 claude-swap and clauth switch for you before a rate limit, show live usage, have a terminal
 interface and run on Windows. claude-swap also has far more tests: 2,183 test functions against
-claudehop's 279 checks (different units, so read this as scale, not a ratio). claudehop has no
+claudehop's 297 checks (different units, so read this as scale, not a ratio). claudehop has no
 terminal interface, no automatic switching and no Windows support. Automatic switching is
 deliberately absent: a hop moves every open session on its next message, so it should never
 happen unasked.
