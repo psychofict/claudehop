@@ -745,6 +745,8 @@ def identify_many(blocks: dict[str, dict]) -> dict[str, dict]:
 
 VERIFY_CACHE = os.path.join(ACCOUNTS, ".verify-cache")
 VERIFY_FRESH_S = 60  # a verification this young is shown again without asking
+# Only a definite answer is worth keeping; "offline" or "http 429" is asked again next time.
+VERIFY_KEEP = ("ok", "invalid", "limited-scope")
 
 
 def read_verify_cache() -> dict:
@@ -756,14 +758,21 @@ def read_verify_cache() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def verify_row(entry: dict | None, now: float, no_cache: bool = False) -> dict | None:
+def verify_row(
+    entry: dict | None, now: float, no_cache: bool = False, block: dict | None = None
+) -> dict | None:
     """The cached identity entry if fresh and usable, else None.
 
-    The cache holds email, plan, accountUuid, tokenState and fetchedAt - no tokens.
+    The cache holds email, plan, accountUuid, tokenState, fetchedAt and the login's
+    expiresAt - no tokens. An entry answers only for the login it was asked about:
+    every rotation and every new login has its own expiry, so a re-login inside the
+    minute is asked about again instead of showing, and saving, the old email.
     """
     if no_cache or not entry or not isinstance(entry, dict):
         return None
-    if not entry.get("tokenState"):
+    if entry.get("tokenState") not in VERIFY_KEEP:
+        return None
+    if block is not None and entry.get("expiresAt") != block.get("expiresAt"):
         return None
     fetched = entry.get("fetchedAt") or 0
     if now - fetched < VERIFY_FRESH_S:
@@ -2025,7 +2034,7 @@ def cmd_list(verify=False, as_json=False, long_=False, no_cache=False, **_):
         to_fetch: dict[str, dict] = {}
         for n in names:
             blk = blocks[n]
-            hit = verify_row(cache.get(n), now, no_cache=no_cache)
+            hit = verify_row(cache.get(n), now, no_cache=no_cache, block=blk)
             if hit is not None:
                 idents[n] = hit
             else:
@@ -2034,14 +2043,17 @@ def cmd_list(verify=False, as_json=False, long_=False, no_cache=False, **_):
             fresh = identify_many(to_fetch)
             for n, ident in fresh.items():
                 idents[n] = ident
-                if not OFFLINE and ident.get("tokenState"):
+                if not OFFLINE and ident.get("tokenState") in VERIFY_KEEP:
                     cache[n] = {
                         "email": ident.get("email"),
                         "plan": ident.get("plan"),
                         "accountUuid": ident.get("accountUuid"),
                         "tokenState": ident.get("tokenState"),
                         "fetchedAt": now,
+                        "expiresAt": to_fetch[n].get("expiresAt"),
                     }
+                else:
+                    cache.pop(n, None)
             if not OFFLINE:
                 cache = {n: v for n, v in cache.items() if n in list_profiles()}
                 try:

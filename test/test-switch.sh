@@ -1321,6 +1321,24 @@ print('ok')" 2>/dev/null | grep -q ok && ok "verify --json outputs cached tokenS
 seed; rm -f "$VC"
 out="$(VERIFY_OFFLINE=1 verify_run "$two_idents")"
 is "offline mode makes no verify request" "$(calls_of "$out")" "0"
+
+# A login that changed inside the minute is never answered from the cache: a re-login
+# as someone else would otherwise show, and save, the previous login's email.
+seed; rm -f "$VC"
+verify_run "$two_idents" >/dev/null
+poke alpha accessToken '"tok-A2"'; poke alpha expiresAt '99999999999998'
+relogin='responses = {
+  "tok-A2": (200, {"account": {"email": "other@x.com", "uuid": "uuid-O", "has_claude_max": True}, "organization": {}}),
+  "tok-B": (200, {"account": {"email": "beta@x.com", "uuid": "uuid-B", "has_claude_pro": True}, "organization": {}})}'
+out="$(verify_run "$relogin")"
+is "a login that changed is asked about again" "$(calls_of "$out")" "1"
+printf '%s' "$out" | grep -E "alpha" | grep -q "other@x.com" && ok "...and shows who it is now" || bad "...and shows who it is now" "$out"
+
+# Only a definite answer is kept: an unreachable server or a 429 is asked again next time.
+seed; rm -f "$VC"
+verify_run 'responses = {"tok-A": (0, {"error": "x"}), "tok-B": (429, {})}' >/dev/null
+out="$(verify_run "$two_idents")"
+is "an unreachable or throttled answer is not cached" "$(calls_of "$out")" "2"
 seed
 
 # --- 22. run: one terminal on its own account -----------------------------------
