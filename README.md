@@ -238,6 +238,10 @@ expose a credential through [SECURITY.md](https://github.com/psychofict/claudeho
 If claudehop saved you a browser round-trip this morning, a star on
 [GitHub](https://github.com/psychofict/claudehop) helps others find it.
 
+Using OpenAI Codex too? [codexhop](https://github.com/psychofict/codexhop) does for ChatGPT logins
+what claudehop does here, and [codexwatch](https://github.com/psychofict/codexwatch) tracks Codex
+tokens, cost and plan limits.
+
 MIT licence. Not affiliated with, endorsed by, or sponsored by Anthropic. "Claude" and "Claude Code" are
 trademarks of Anthropic, PBC, used here only to say what this works with.
 
