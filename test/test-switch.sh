@@ -1753,8 +1753,9 @@ echo alpha > "$CLAUDE_ACCOUNTS_DIR/next.tmp-claudehop.4242"
 "$HOP" doctor --fix >/dev/null 2>&1
 [ ! -e "$CLAUDE_ACCOUNTS_DIR/next.tmp-claudehop.4242" ] && ok "...and --fix removes it" || bad "...and --fix removes it" "still there"
 "$HOP" use beta >/dev/null 2>&1; "$HOP" provider zz true >/dev/null 2>&1
-[ -z "$(ls "$CLAUDE_ACCOUNTS_DIR" | grep 'tmp')" ] && ok "pointer and provider writes leave no temp file behind" \
-  || bad "pointer and provider writes leave no temp file behind" "$(ls "$CLAUDE_ACCOUNTS_DIR")"
+left="$(find "$CLAUDE_ACCOUNTS_DIR" -maxdepth 1 -name '*tmp*')"
+[ -z "$left" ] && ok "pointer and provider writes leave no temp file behind" \
+  || bad "pointer and provider writes leave no temp file behind" "$left"
 out="$(run_inproc '
 def refuse(a, b):
     raise OSError("disk full")
