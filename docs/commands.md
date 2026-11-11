@@ -141,7 +141,9 @@ switched to home (me@gmail.com, team)
 `hop next` reads the 5-hour window of every login in its list except the one you are on, and hops to
 the one with the most room. Within ten points it prefers the window that resets soonest, because what
 that one has left is lost at the reset. A login at 95% or more of its 5-hour window, or at an
-all-model weekly limit, is skipped. A reading the endpoint will not give is taken through Claude Code,
+all-model weekly limit, is skipped, and so is one that is open in a `hop run` session, because a hop
+into it would sign that session out. A reading less than five minutes old is not asked for again.
+A reading the endpoint will not give is taken through Claude Code,
 as `--probe` does, so the choice is never made on an old figure. When no login has room it stays where
 it is, exits with status 1, and says which one frees up first.
 
@@ -179,6 +181,9 @@ hop list --verify    # check every saved token against the API
 hop rm <name>        # delete a saved account (does not log you out)
 hop rename <old> <new>
 ```
+
+`rm`, and `save` or `add` over a name that already exists, ask before they go ahead. With no
+terminal to ask on, they say so and change nothing unless you pass `--yes`.
 
 Every login needs a real `/login` about once a month: a refresh token dies 30 days after the login
 that issued it, and renewing does not move that date. `hop doctor` names the day the earliest

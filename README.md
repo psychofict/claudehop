@@ -194,7 +194,8 @@ open session. `hop run` gives one terminal its own config home and leaves the ot
 *Does an open session really change account?* Yes, on its next message. On Linux with Claude Code
 2.1.284, a session sent its next message with the new login about two seconds after a swap in
 headless mode, and 0.9 seconds after it on the interactive screen, in three runs out of three. The
-script that measured it is in the repository, so you can repeat it on a newer version.
+interactive result held on 2.1.322, in four runs out of four. The script that measured it is in the
+repository, so you can repeat it on a newer version.
 
 *Why does `hop usage` say "throttled"?* The usage endpoint budgets clients other than Claude Code and
 can refuse a token for up to an hour. `hop usage` shows the last reading with its age and does not

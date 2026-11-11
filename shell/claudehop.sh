@@ -28,15 +28,12 @@ alias hop='claudehop'
 
 _claudehop_names() {
   local d="${CLAUDE_ACCOUNTS_DIR:-$HOME/.claude/accounts}" f n
-  for f in "$d"/*.json; do
+  for f in "$d"/*.json "$d"/*.provider; do
     [ -e "$f" ] || continue
-    n="${f##*/}"
-    printf '%s ' "${n%.json}"
-  done
-  for f in "$d"/*.provider; do
-    [ -e "$f" ] || continue
-    n="${f##*/}"
-    printf '%s ' "${n%.provider}"
+    n="${f##*/}"; n="${n%.json}"; n="${n%.provider}"
+    # compgen -W expands what it is given, so a file name holding $(...) would run on TAB.
+    case "$n" in *[!A-Za-z0-9._-]*) continue ;; esac
+    printf '%s ' "$n"
   done
 }
 

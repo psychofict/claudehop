@@ -17,6 +17,9 @@ Result, 13 October 2026, Linux, Claude Code 2.1.284: three runs out of three sen
 first message with the old login and the second, 0.9 s after the swap, with the new
 one. Claude Code left the swapped file as it was. It reads the file, so this says
 nothing about macOS, where the login is in the keychain.
+
+Repeated 11 November 2026, Linux, Claude Code 2.1.322: four runs out of four, the second
+message 0.91 to 0.92 s after the swap, again with the new login.
 """
 import fcntl, http.server, json, os, pty, re, select, shutil, signal, struct, sys, tempfile, termios, threading, time
 

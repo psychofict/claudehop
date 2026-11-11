@@ -863,7 +863,7 @@ is "the live account is still found past the broken profile" "$("$HOP" active 2>
 # out of the store, calls the token endpoint and writes the result back. A switch
 # inside that window is overwritten by the old account's refreshed token. We hold
 # the same two, in its order, while we read and replace the login. Behaviour of
-# Claude Code itself was checked against 2.1.284 by tracing it in a sandbox.
+# Claude Code itself was checked against 2.1.284 and 2.1.322 by tracing it in a sandbox.
 PRIMARY="$TMP/.oauth_refresh.lock"; LEGACY="$TMP.lock"
 hold() {  # hold <seconds> <dir>...  the way Claude Code does: mkdir, wait, rmdir
   python3 -c "
@@ -1610,6 +1610,327 @@ print("other saved:", ca.peek_profile("other").get("claudeAiOauth", {}).get("acc
   && ok "a /login as somebody else inside a session does not overwrite the account" || bad "a /login as somebody else inside a session does not overwrite the account" "$out"
 printf '%s' "$out" | grep -q "other saved: tok-STRANGER" && ok "...it is saved under its own name instead" || bad "...it is saved under its own name instead" "$out"
 printf '%s' "$out" | grep -q "home now: tok-B$" && ok "...and the home goes back to the account's login" || bad "...and the home goes back to the account's login" "$out"
+seed
+
+# --- 23. found by auditing the code for 2.1.0 -------------------------------------
+# Each of these was reproduced against 2.0.0 first.
+
+# A claudehop flag before `run` used to hold the lock around the whole session,
+# and `run` then waited for the lock it already held.
+seed
+runhop "$HOP" -y run beta >/dev/null 2>&1 &
+RUNPID=$!
+for _ in $(seq 60); do kill -0 "$RUNPID" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$RUNPID" 2>/dev/null; then
+  kill "$RUNPID" 2>/dev/null
+  bad "a claudehop flag before run does not hang it" "still waiting after 6s"
+else
+  ok "a claudehop flag before run does not hang it"
+fi
+wait "$RUNPID" 2>/dev/null
+is "...and the session ran as that account" "$(cat "$OUT/token_seen" 2>/dev/null)" "tok-B"
+
+# A login nobody had saved was stashed under its email's name, over a different
+# account that already had that name, and the only copy of that login was gone.
+seed
+out="$(run_inproc '
+ca.OFFLINE = False
+ca.api_profile = lambda tok, timeout=0: (200, {"account": {"email": "alpha@elsewhere.org", "uuid": "u-OTHER", "has_claude_max": True}, "organization": {"name": "Other"}})
+stranger = {"accessToken": "tok-STRANGER", "refreshToken": "r-STRANGER", "expiresAt": 99999999999999}
+ca.set_live_oauth(stranger)
+print("stashed as:", ca.sync_live_before_switch(stranger))
+print("alpha:", ca.peek_profile("alpha")["claudeAiOauth"]["accessToken"])
+print("alpha-2:", ca.peek_profile("alpha-2")["claudeAiOauth"]["accessToken"])
+' 2>&1)"
+printf '%s' "$out" | grep -q "^alpha: tok-A$" && ok "a stashed login never overwrites another account that has the name" || bad "a stashed login never overwrites another account that has the name" "$out"
+printf '%s' "$out" | grep -q "^stashed as: alpha-2$" && printf '%s' "$out" | grep -q "^alpha-2: tok-STRANGER$" \
+  && ok "...it is saved under the next free name" || bad "...it is saved under the next free name" "$out"
+seed
+rm "$CLAUDE_ACCOUNTS_DIR/active"          # the pointer is lost, and Claude Code has rotated alpha's login
+out="$(run_inproc '
+ca.OFFLINE = False
+ca.api_profile = lambda tok, timeout=0: (200, {"account": {"email": "alpha@x.com", "uuid": "uuid-A", "has_claude_max": True}, "organization": {"name": "X"}})
+newer = {"accessToken": "tok-A2", "refreshToken": "r-A2", "expiresAt": 99999999999999}
+ca.set_live_oauth(newer)
+print("stashed as:", ca.sync_live_before_switch(newer))
+print("alpha:", ca.peek_profile("alpha")["claudeAiOauth"]["accessToken"])
+print("copies:", sorted(n for n in ca.list_profiles() if n.startswith("alpha")))
+' 2>&1)"
+printf '%s' "$out" | grep -q "^alpha: tok-A2$" && printf '%s' "$out" | grep -q "^copies: \['alpha'\]$" \
+  && ok "...but a newer login of the same account goes back to its own profile" || bad "...but a newer login of the same account goes back to its own profile" "$out"
+
+# `rename` left the old name in the next list, so the login quietly dropped out
+# of it, and lost the saved server refusal that told the next read to wait.
+seed
+"$HOP" next alpha beta >/dev/null 2>&1
+python3 - <<'PY'
+import json, os
+d = os.environ["CLAUDE_ACCOUNTS_DIR"]
+json.dump({"beta": {"windows": {"five_hour": {"pct": 10.0, "resetsAt": None}}, "fetchedAt": 1.0,
+                    "throttledUntil": 9999999999.0}}, open(d + "/.usage-cache", "w"))
+PY
+"$HOP" rename beta bravo >/dev/null 2>&1
+is "rename keeps the login in the next list" "$(tr '\n' ' ' < "$CLAUDE_ACCOUNTS_DIR/next")" "alpha bravo "
+is "...and its saved server refusal with it" "$(jget "$CLAUDE_ACCOUNTS_DIR/.usage-cache" bravo.throttledUntil)" "9999999999.0"
+
+# `rm ../outside` deleted ~/.claude/outside.json.
+seed
+echo '{"claudeAiOauth":{"accessToken":"tok-OUT"}}' > "$TMP/outside.json"
+"$HOP" rm -y ../outside >/dev/null 2>&1
+[ -e "$TMP/outside.json" ] && ok "rm will not leave the accounts folder" || bad "rm will not leave the accounts folder" "$TMP/outside.json was deleted"
+"$HOP" use ../outside >/dev/null 2>&1
+is "...nor will use" "$(live_token)" "tok-A"
+runhop "$HOP" run ../outside >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && [ ! -e "$RH/../outside" ] && ok "...nor will run" || bad "...nor will run" "rc=$rc"
+rm -f "$TMP/outside.json"
+
+# Valid JSON of the wrong shape ended in a traceback.
+seed
+echo null > "$TMP/.credentials.json"
+out="$("$HOP" list 2>&1)"
+printf '%s' "$out" | grep -q "Traceback" && bad "a credential file holding null is refused, not a crash" "$out" || ok "a credential file holding null is refused, not a crash"
+printf '%s' "$out" | grep -q "does not hold a JSON object" && ok "...and the message says what is wrong" || bad "...and the message says what is wrong" "$out"
+seed
+python3 - <<'PY'
+import json, os
+p = os.environ["CLAUDE_ACCOUNTS_DIR"] + "/beta.json"
+d = json.load(open(p)); d["claudeAiOauth"] = None; json.dump(d, open(p, "w"))
+PY
+out="$("$HOP" doctor 2>&1)"
+printf '%s' "$out" | grep -q "Traceback" && bad "doctor reports a saved login that is null" "$out" || ok "doctor reports a saved login that is null"
+printf '%s' "$out" | grep -q "'beta' has no saved credentials" && ok "...and names the account" || bad "...and names the account" "$out"
+seed
+
+out="$(run_inproc '
+ca.OFFLINE = False
+for body in ({"account": {"email": "a@b.c", "uuid": "u", "has_claude_pro": True}, "organization": None},
+             {"account": None, "organization": None}, []):
+    ca._IDENT_CACHE.clear()
+    ca.api_profile = lambda tok, timeout=0, b=body: (200, b)
+    print("state:", ca.identity({"accessToken": "t"}).get("tokenState"))
+' 2>&1)"
+[ "$out" = "$(printf 'state: ok\nstate: ok\nstate: ok')" ] \
+  && ok "a null account or organization in the profile reply is not a crash" || bad "a null account or organization in the profile reply is not a crash" "$out"
+
+# Retry-After is seconds or an HTTP date; NaN once crashed the countdown.
+out="$(run_inproc '
+for v in ("120", "nan", "inf", "-5", "", None, "soon", "Wed, 21 Oct 2099 07:28:00 GMT"):
+    r = ca.parse_retry_after(v)
+    print(repr(v), "->", "none" if r is None else ("far" if r > 1e6 else round(r)))
+' 2>&1)"
+for want in "'120' -> 120" "'nan' -> none" "'inf' -> none" "'-5' -> 0" "'' -> none" "None -> none" "'soon' -> none" "'Wed, 21 Oct 2099 07:28:00 GMT' -> far"; do
+  printf '%s\n' "$out" | grep -qxF -- "$want" && ok "Retry-After $want" || bad "Retry-After $want" "$out"
+done
+
+# `next` asked the usage endpoint again for a login whose reading it already
+# counts as current (under 5 minutes), which is how a login earns a refusal.
+seed
+python3 - <<'PY'
+import json, os, time
+d = os.environ["CLAUDE_ACCOUNTS_DIR"]
+json.dump({"beta": {"windows": {"five_hour": {"pct": 20.0, "resetsAt": None}}, "fetchedAt": time.time() - 120,
+                    "source": "usage"}}, open(d + "/.usage-cache", "w"))
+PY
+out="$(next_run 'responses = {}' alpha beta)"
+printf '%s' "$out" | grep -q '^ASKED=$' && ok "next does not ask again about a reading under five minutes old" \
+  || bad "next does not ask again about a reading under five minutes old" "$out"
+is "...and chooses on it" "$(live_token)" "tok-B"
+seed
+python3 - <<'PY'
+import json, os, time
+d = os.environ["CLAUDE_ACCOUNTS_DIR"]
+json.dump({"beta": {"windows": {"five_hour": {"pct": 20.0, "resetsAt": None}}, "fetchedAt": time.time() - 400,
+                    "source": "usage"}}, open(d + "/.usage-cache", "w"))
+PY
+out="$(next_run 'responses = {"tok-B": (200, {"five_hour": {"utilization": 10.0, "resets_at": at(hours=2)}}, None)}' alpha beta)"
+printf '%s' "$out" | grep -q '^ASKED=tok-B$' && ok "...but asks about an older one" || bad "...but asks about an older one" "$out"
+seed
+
+# Leftovers from a killed pointer write are found by doctor, like the other temp files.
+seed
+echo alpha > "$CLAUDE_ACCOUNTS_DIR/next.tmp-claudehop.4242"
+"$HOP" doctor 2>&1 | grep -q "stale file" && ok "doctor finds a temp file a crashed write left" || bad "doctor finds a temp file a crashed write left" "$("$HOP" doctor 2>&1)"
+"$HOP" doctor --fix >/dev/null 2>&1
+[ ! -e "$CLAUDE_ACCOUNTS_DIR/next.tmp-claudehop.4242" ] && ok "...and --fix removes it" || bad "...and --fix removes it" "still there"
+"$HOP" use beta >/dev/null 2>&1; "$HOP" provider zz true >/dev/null 2>&1
+[ -z "$(ls "$CLAUDE_ACCOUNTS_DIR" | grep 'tmp')" ] && ok "pointer and provider writes leave no temp file behind" \
+  || bad "pointer and provider writes leave no temp file behind" "$(ls "$CLAUDE_ACCOUNTS_DIR")"
+out="$(run_inproc '
+def refuse(a, b):
+    raise OSError("disk full")
+ca.os.replace = refuse
+try:
+    ca.set_active_ptr("beta")
+except OSError as e:
+    print("raised:", e)
+print("temp files:", len([f for f in os.listdir(ca.ACCOUNTS) if "tmp" in f]))
+' 2>&1)"
+printf '%s' "$out" | grep -q "^temp files: 0$" && ok "a pointer write that fails cleans up its temp file" \
+  || bad "a pointer write that fails cleans up its temp file" "$out"
+seed
+
+# `add` looked the live login up on the network while it held Claude Code's
+# refresh lock, which Claude Code then waits behind.
+seed
+out="$(HOP="$HOP" python3 - <<'PY' 2>&1
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+ca.OFFLINE = False
+class Tty:
+    def isatty(self):
+        return True
+sys.stdin = Tty()
+ca.shutil.which = lambda cmd: "/bin/true"
+ca.running_claude_pids = lambda: []
+primary, _ = ca.claude_lock_dirs()
+seen = []
+def profile(tok, timeout=0):
+    seen.append("held" if os.path.isdir(primary) else "free")
+    return 200, {"account": {"email": "alpha@x.com", "uuid": "uuid-A", "has_claude_max": True}, "organization": {"name": "X"}}
+ca.api_profile = profile
+ca.subprocess.call = lambda *a, **k: None          # claude exits without a login
+ca.set_live_oauth(dict(ca.live_oauth(), accessToken="tok-A-rotated"))   # Claude Code rotated it
+try:
+    ca.cmd_add(name="gamma", yes=True)
+except SystemExit:
+    pass
+print("lookups:", ",".join(seen) or "none")
+PY
+)"
+printf '%s' "$out" | grep -q "^lookups: free$" && ok "add makes no network call while it holds Claude Code's refresh lock" \
+  || bad "add makes no network call while it holds Claude Code's refresh lock" "$out"
+seed
+
+# ---- the second batch from the same audit --------------------------------------
+
+# Tab completion ran a command written into a saved account's file name:
+# compgen -W expands what it is given.
+seed; add_gamma
+mkdir -p "$TMP/comp"; rm -f "$TMP/comp/PWNED"
+echo '{}' > "$CLAUDE_ACCOUNTS_DIR/"'x$(>PWNED).json'
+for src in 'eval "$("$1" shell-init)"' 'source "$2/shell/claudehop.sh"'; do
+  rm -f "$TMP/comp/PWNED"
+  got="$(cd "$TMP/comp" && bash -c "$src"'
+COMP_WORDS=(hop use ""); COMP_CWORD=2; _claudehop_complete; echo "${COMPREPLY[*]}"' _ "$HOP" "$ROOT" 2>&1)"
+  label="${src%% *}"
+  [ ! -e "$TMP/comp/PWNED" ] && ok "completion does not run a command named in a file ($label)" \
+    || bad "completion does not run a command named in a file ($label)" "the file name was run"
+  is "...and still offers the real accounts ($label)" "$got" "alpha beta gamma"
+done
+rm -f "$CLAUDE_ACCOUNTS_DIR/"'x$(>PWNED).json'
+
+# `rm` with nobody to ask used to take silence as yes.
+seed; add_gamma
+"$HOP" rm gamma </dev/null >/dev/null 2>&1
+[ -e "$CLAUDE_ACCOUNTS_DIR/gamma.json" ] && ok "rm with no terminal and no --yes removes nothing" || bad "rm with no terminal and no --yes removes nothing" "gamma.json is gone"
+"$HOP" rm -y gamma </dev/null >/dev/null 2>&1
+[ ! -e "$CLAUDE_ACCOUNTS_DIR/gamma.json" ] && ok "...and --yes removes it" || bad "...and --yes removes it" "still there"
+
+# A refresh of an account that is not the live one went to whichever name the
+# pointer said, even when the pointer was stale and the live login was somebody else's.
+seed
+out="$(run_inproc '
+ca.OFFLINE = False
+ca.api_profile = lambda tok, timeout=0: (200, {"account": {"email": "other@elsewhere.org", "uuid": "uuid-OTHER", "has_claude_max": True}, "organization": {"name": "O"}})
+ca.set_live_oauth({"accessToken": "tok-STRANGER", "refreshToken": "r-STRANGER", "expiresAt": 99999999999999})
+sent = []
+def fake_refresh(blk, timeout=0):
+    sent.append(blk.get("refreshToken"))
+    return {"accessToken": "tok-new", "refreshToken": "r-new", "expiresAt": 99999999999999 + 1, "refreshTokenExpiresAt": 99999999999999}, {}, ""
+ca.refresh_block = fake_refresh
+ca.cmd_renew(name="alpha", yes=True)
+print("refreshed:", ",".join(sent))
+print("alpha uuid:", ca.peek_profile("alpha").get("accountUuid"))
+print("live:", ca.live_oauth()["accessToken"])
+' 2>&1)"
+printf '%s' "$out" | grep -q "^refreshed: r-alpha$" && printf '%s' "$out" | grep -q "^live: tok-STRANGER$" \
+  && ok "renew leaves a login alone when the pointer no longer describes it" \
+  || bad "renew leaves a login alone when the pointer no longer describes it" "$out"
+
+# `use` after a `run` session that died without saving: the home holds the
+# newer login, and the profile's copy has had its refresh token retired.
+seed
+out="$(run_inproc '
+os.makedirs(ca.run_home("beta"), mode=0o700)
+ca._write_run_creds("beta", {"accessToken": "tok-B-run", "refreshToken": "r-B-run", "expiresAt": 99999999999999 + 5000, "refreshTokenExpiresAt": 99999999999999})
+ca.cmd_use(name="beta", yes=True)
+print("live:", ca.live_oauth()["accessToken"])
+print("beta:", ca.peek_profile("beta")["claudeAiOauth"]["accessToken"])
+' 2>&1)"
+printf '%s' "$out" | grep -q "^live: tok-B-run$" && printf '%s' "$out" | grep -q "^beta: tok-B-run$" \
+  && ok "use picks up the newer login a crashed run session left in its home" \
+  || bad "use picks up the newer login a crashed run session left in its home" "$out"
+
+# A saved copy never overwrites a newer one of the same login.
+seed
+out="$(run_inproc '
+ca.save_live_copy("alpha", {"accessToken": "tok-older", "refreshToken": "r-older", "expiresAt": 1000})
+print("older:", ca.peek_profile("alpha")["claudeAiOauth"]["accessToken"])
+ca.save_live_copy("alpha", {"accessToken": "tok-newer", "refreshToken": "r-newer", "expiresAt": 99999999999999 + 1})
+print("newer:", ca.peek_profile("alpha")["claudeAiOauth"]["accessToken"])
+' 2>&1)"
+printf '%s' "$out" | grep -q "^older: tok-A$" && printf '%s' "$out" | grep -q "^newer: tok-newer$" \
+  && ok "a saved login is only replaced by a later one" || bad "a saved login is only replaced by a later one" "$out"
+
+# `next` and run sessions, and the ten-point rule.
+seed; add_gamma; rm -f "$CLAUDE_ACCOUNTS_DIR/.usage-cache"
+mkdir -p "$RH/gamma/.hop-pids"; : > "$RH/gamma/.hop-pids/$$"
+out="$(next_run 'responses = {
+  "tok-B": (200, {"five_hour": {"utilization": 80, "resets_at": at(hours=1)}}, None),
+  "tok-G": (200, {"five_hour": {"utilization": 12, "resets_at": at(hours=4)}}, None)}' alpha beta gamma)"
+is "next leaves out an account open in a run session" "$(live_token)" "tok-B"
+printf '%s' "$out" | grep -q "leaving out gamma" && ok "...and says so" || bad "...and says so" "$out"
+rm -rf "$RH/gamma"
+seed; add_gamma; rm -f "$CLAUDE_ACCOUNTS_DIR/.usage-cache"
+next_run 'responses = {
+  "tok-B": (200, {"five_hour": {"utilization": 18, "resets_at": at(hours=4)}}, None),
+  "tok-G": (200, {"five_hour": {"utilization": 22, "resets_at": at(hours=1)}}, None)}' alpha beta gamma >/dev/null
+is "next prefers the window that resets sooner among logins within ten points" "$(live_token)" "tok-G"
+seed; add_gamma; rm -f "$CLAUDE_ACCOUNTS_DIR/.usage-cache"
+next_run 'responses = {
+  "tok-B": (200, {"five_hour": {"utilization": 10, "resets_at": at(hours=4)}}, None),
+  "tok-G": (200, {"five_hour": {"utilization": 60, "resets_at": at(hours=1)}}, None)}' alpha beta gamma >/dev/null
+is "...but not at the cost of much more room" "$(live_token)" "tok-B"
+
+# A signal during a refresh waits until the new login is on disk.
+seed
+SIGOUT="$TMP/sig.out"; rm -f "$SIGOUT"
+HOP="$HOP" python3 - <<'PY' >"$SIGOUT" 2>&1 &
+import importlib.machinery, importlib.util, os, time
+loader = importlib.machinery.SourceFileLoader("ca", os.environ["HOP"])
+ca = importlib.util.module_from_spec(importlib.util.spec_from_loader("ca", loader))
+loader.exec_module(ca)
+ca.OFFLINE = False
+def slow(blk, timeout=0):
+    print("refreshing", flush=True)
+    time.sleep(1.0)
+    return {"accessToken": "tok-B-new", "refreshToken": "r-B-new", "expiresAt": 99999999999999 + 1, "refreshTokenExpiresAt": 99999999999999}, {}, ""
+ca.refresh_block = slow
+ca.cmd_renew(name="beta", yes=True)
+PY
+SIGPID=$!
+for _ in $(seq 40); do grep -q refreshing "$SIGOUT" 2>/dev/null && break; sleep 0.1; done
+kill -TERM "$SIGPID" 2>/dev/null; wait "$SIGPID" 2>/dev/null
+is "a signal in the middle of a refresh does not lose the new login" "$(jget "$CLAUDE_ACCOUNTS_DIR/beta.json" claudeAiOauth.accessToken)" "tok-B-new"
+
+# A run home that is a link to a real folder is unlinked, not emptied.
+seed
+mkdir -p "$TMP/real-home/sub"; echo keep > "$TMP/real-home/sub/file"; echo keep > "$TMP/real-home/top"
+mkdir -p "$RH"; ln -s "$TMP/real-home" "$RH/beta"
+run_inproc 'ca.remove_run_home("beta")' >/dev/null
+{ [ ! -e "$RH/beta" ] && [ -f "$TMP/real-home/sub/file" ] && [ -f "$TMP/real-home/top" ]; } \
+  && ok "removing a run home that is a link leaves what it points at" \
+  || bad "removing a run home that is a link leaves what it points at" "$(ls -R "$TMP/real-home" 2>&1)"
+rm -rf "$TMP/real-home"
+
+# A profile that will not parse is set aside, and the copy keeps the private mode.
+seed
+echo '{"claudeAiOauth": {"accessToken": "tok-broken' > "$CLAUDE_ACCOUNTS_DIR/gamma.json"; chmod 644 "$CLAUDE_ACCOUNTS_DIR/gamma.json"
+run_inproc 'ca.save_profile("gamma", {"accessToken": "tok-G", "refreshToken": "r-G", "expiresAt": 99999999999999}, {})' >/dev/null
+is "a profile that will not parse is kept aside as .bak" "$(grep -c 'tok-broken' "$CLAUDE_ACCOUNTS_DIR/gamma.json.bak")" "1"
+is "...in private mode" "$(stat -c %a "$CLAUDE_ACCOUNTS_DIR/gamma.json.bak" 2>/dev/null || stat -f %Lp "$CLAUDE_ACCOUNTS_DIR/gamma.json.bak")" "600"
 seed
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

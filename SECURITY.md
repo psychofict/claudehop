@@ -11,10 +11,17 @@ What the tool does about that:
 
 - `accounts/` is created `700`, every profile is written `600`, and both are
   re-tightened on every run if something loosened them.
-- Writes are atomic — a new file with the right mode, `fsync`, then `rename` —
-  so a crash mid-write cannot leave a half-written or world-readable credential.
-- No `.bak` copies of profiles are kept. `claudehop doctor --fix` removes any
-  left by an older version.
+- Writes are atomic — a new file created `600` and never through a link, `fsync`,
+  then `rename` — so a crash mid-write cannot leave a half-written or
+  world-readable credential.
+- No `.bak` copies of profiles are kept, with one exception: a saved login that
+  will not parse is moved to `<name>.json.bak` (mode `600`) before a good login
+  is written in its place, because it may be the only copy of something. `claudehop
+  doctor` lists it and `--fix` removes it.
+- A name that reaches a path or a shell is checked first: `rm ../x` is refused,
+  and the shell completion skips a file name that holds anything but letters,
+  digits, `.`, `_` and `-`, so a file dropped into `accounts/` cannot run a command
+  when you press Tab.
 - Tokens never appear in `--json` output, in log lines, or in any error message.
 - Network calls go only to Anthropic, each with the account's own token:
   `GET https://api.anthropic.com/api/oauth/profile` (email and plan),

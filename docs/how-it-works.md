@@ -66,17 +66,22 @@ with the network calls done first. If Claude Code is mid-refresh it waits up to 
 stops with nothing changed (`CLAUDE_HOP_LOCK_WAIT` sets the wait). `doctor` reports a lock left
 behind by a run that died.
 
-Claude Code's side was checked on 2.1.284 by tracing it with `strace` in a sandbox with the network
-cut off. The locks follow the proper-lockfile convention: one older than 60 seconds counts as stale,
-and the holder touches it every 5 seconds. When another tool holds either lock, Claude Code waits
-(six attempts over about seven seconds, then it tries again later) and never removes one younger
-than 60 seconds.
+Claude Code's side was checked on 2.1.284, and again on 2.1.322 on 11 November 2026, by tracing it
+with `strace` in a sandbox with the network cut off. The locks follow the proper-lockfile
+convention: one older than 60 seconds counts as stale, and the holder touches it every 5 seconds.
+When another tool holds either lock, Claude Code waits (six attempts over about eight seconds, then
+it stops with "another Claude Code process is refreshing it") and never removes one younger than 60
+seconds. If the second lock is the one held, it lets go of the first between attempts. Version
+2.1.322 also writes a file called `.oauth_refresh.lock.owner` beside the first lock while it holds
+it. A lock without that file, which is what claudehop leaves, was respected all the same.
 
 ## Open sessions follow a hop
 
 Claude Code reads the credential store again before each message. It does not hold the login for
 the life of a session. Measured on Linux with Claude Code 2.1.284, in a sandbox with the network cut
-off, against a local fake server that records each request's bearer token:
+off, against a local fake server that records each request's bearer token. The interactive row was
+repeated on 2.1.322 and came out the same in four runs out of four, with the new login 0.91 to 0.92
+seconds after the swap; the headless row was not repeated:
 
 | Mode | First message | Next message after an atomic swap of the file |
 |---|---|---|

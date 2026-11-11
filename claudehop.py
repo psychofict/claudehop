@@ -80,6 +80,7 @@ import binascii
 import contextlib
 import getpass
 import json
+import math
 import os
 import random
 import re
@@ -90,7 +91,7 @@ import sys
 import textwrap
 import time
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 PROG = "claudehop"
 
 
@@ -168,30 +169,88 @@ def pad(s: str, width: int) -> str:
     return s + " " * max(0, width - visible_len(s))
 
 
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def printable(value) -> str:
+    """Text that is safe to print: control characters, which include the escape
+    that starts a terminal sequence, are removed. Used for anything a server or
+    another process wrote that we show or keep."""
+    return _CONTROL.sub("", str(value)).strip()
+
+
+def text_or_none(value) -> str | None:
+    return printable(value) if isinstance(value, str) and value else None
+
+
+def finite_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 # ------------------------------------------------------------------ json files
 
 
 def read_json(path: str) -> dict:
+    """The JSON object in a file; {} if there is no file. Stops the command, with
+    the path, when the file is not a JSON object: every caller goes on to use the
+    result as a dict, and a `null` or a list would otherwise end in a traceback."""
     try:
         with open(path) as f:
-            return json.load(f)
+            data = json.load(f)
     except FileNotFoundError:
         return {}
     except json.JSONDecodeError as e:
         die(f"{path} is not valid JSON ({e}). Refusing to touch it.")
+    except OSError as e:
+        die(f"could not read {path}: {e.strerror or e}")
+    if not isinstance(data, dict):
+        die(f"{path} does not hold a JSON object. Refusing to touch it.")
+    return data
+
+
+def new_temp(path: str) -> tuple[str, int]:
+    """The temp file for an atomic write of `path`, opened 0600. O_EXCL and
+    O_NOFOLLOW: a link planted at a guessable name must not redirect the write.
+    The name carries the marker `doctor` looks for, so a leftover is found."""
+    for _ in range(8):
+        tmp = f"{path}{TMP_MARKERS[0]}.{os.getpid()}.{os.urandom(3).hex()}"
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            return tmp, os.open(tmp, flags, 0o600)
+        except FileExistsError:
+            continue
+    raise FileExistsError(path)
+
+
+def write_text_secure(path: str, text: str):
+    """Atomic and 0600, for the small pointer and list files. The temp file carries
+    the marker `doctor` looks for, so one a crash leaves behind is found and removed."""
+    tmp, fd = new_temp(path)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
 
 
 def write_json_secure(path: str, data: dict, keep_backup: bool = False):
     """Atomic, 0600, fsynced. Optionally keeps a .bak of the previous file."""
-    tmp = f"{path}{TMP_MARKERS[0]}.{os.getpid()}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    tmp, fd = new_temp(path)
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
         if keep_backup and os.path.exists(path):
-            shutil.copy2(path, path + ".bak")
+            with open(path, "rb") as src:
+                old = src.read()
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+            bak = os.open(path + ".bak", flags, 0o600)
+            with os.fdopen(bak, "wb") as f:  # 0600 from the first byte, not chmod after a copy
+                f.write(old)
             os.chmod(path + ".bak", 0o600)
         os.replace(tmp, path)
         os.chmod(path, 0o600)
@@ -238,12 +297,15 @@ class KeychainStore:
         self.where = f"keychain item {service!r} (account {self.account})"
 
     def _security(self, args: list[str]) -> tuple[int, str, str]:
-        p = subprocess.run(
-            ["security", *args],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        try:
+            p = subprocess.run(
+                ["security", *args],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            die("the keychain did not answer within 30 seconds. Is a dialog waiting for you?")
         return p.returncode, p.stdout, p.stderr
 
     def exists(self) -> bool:
@@ -267,12 +329,15 @@ class KeychainStore:
             return {}
         # `security` prints the secret as text, but as hex if it is not printable.
         try:
-            return json.loads(raw)
+            doc = json.loads(raw)
         except json.JSONDecodeError:
             try:
-                return json.loads(binascii.unhexlify(raw).decode())
+                doc = json.loads(binascii.unhexlify(raw).decode())
             except Exception:
-                die("the keychain item does not contain the JSON Claude Code expects.")
+                doc = None
+        if not isinstance(doc, dict):
+            die("the keychain item does not contain the JSON Claude Code expects.")
+        return doc
 
     def write(self, doc: dict):
         blob = json.dumps(doc).encode()
@@ -356,21 +421,27 @@ class _Lock:
             with open(self.path) as f:
                 pid, started, cmd = f.read().split(" ", 2)
             since = time.strftime("%H:%M", time.localtime(float(started)))
-            return f" (pid {int(pid)}, `{cmd.strip()}`, since {since})"
-        except (OSError, ValueError):
+            return f" (pid {int(pid)}, `{printable(cmd)}`, since {since})"
+        except (OSError, ValueError, OverflowError):
             return ""
 
     def __enter__(self):
         if fcntl is None:
             return self
         profiles_dir()
-        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except OSError as e:
+            die(f"cannot open the lock file {self.path}: {e.strerror or e}. Is it a link? Remove it.")
         try:
             fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             info(f"{DIM}waiting for another {PROG} to finish{self.holder()}...{OFF}")
             fcntl.flock(self.fd, fcntl.LOCK_EX)
-        me = f"{os.getpid()} {time.time():.0f} {' '.join([PROG] + sys.argv[1:])}"
+        words = sys.argv[1:]
+        if "run" in words[:2]:  # what follows is for claude, a prompt perhaps: not for a file
+            words = words[: words.index("run") + 2]
+        me = f"{os.getpid()} {time.time():.0f} {' '.join([PROG] + words)[:200]}"
         os.ftruncate(self.fd, 0)
         os.pwrite(self.fd, me.encode(), 0)
         return self
@@ -397,14 +468,16 @@ def lock():
 # is overwritten by the old account's refreshed token, and the profile we just
 # saved holds a refresh token the server has already retired.
 #
-# Checked against Claude Code 2.1.284 by tracing it in a sandbox with the
-# network cut off: it takes <config>/.oauth_refresh.lock, then <config>.lock
-# (~/.claude.lock by default); if the second is held it releases the first and
-# retries about every 2s; it never removes a lock younger than 60s, and it
-# waits (six mkdir attempts, then gives up for now) when another tool holds
-# either one. So holding both, in its order, while we read and overwrite the
-# store keeps its refresh out of the way. Keep the held section to file
-# reads and writes; do the network calls first.
+# Checked against Claude Code 2.1.284, and again against 2.1.322, by tracing it
+# in a sandbox with the network cut off: it takes <config>/.oauth_refresh.lock,
+# then <config>.lock (~/.claude.lock by default); if the second is held it
+# releases the first and retries about every 2s; it never removes a lock
+# younger than 60s, and it waits (six mkdir attempts, then gives up for now)
+# when another tool holds either one. 2.1.322 also writes a file called
+# .oauth_refresh.lock.owner beside the first lock while it holds it; a lock
+# with no such file is still respected. So holding both, in its order, while we
+# read and overwrite the store keeps its refresh out of the way. Keep the held
+# section to file reads and writes; do the network calls first.
 
 CLAUDE_LOCK_STALE_S = 60.0  # Claude Code's `stale: 60000`
 CLAUDE_LOCK_WAIT_S = float(env("CLAUDE_HOP_LOCK_WAIT") or 9.0)
@@ -415,6 +488,46 @@ def claude_lock_dirs() -> tuple[str, str]:
         os.path.join(CLAUDE_DIR, ".oauth_refresh.lock"),
         os.path.realpath(CLAUDE_DIR) + ".lock",
     )
+
+
+class _DeferSignals:
+    """Hold SIGINT, SIGTERM and SIGHUP until a login that is half-written is whole.
+
+    A refresh token is single use. Once the server has rotated it, the only copy
+    is in its reply, so a process that dies while it waits for that reply, or
+    before it writes it down, has signed the account out. The wait and the write
+    finish first; the signal is delivered after.
+    """
+
+    def __init__(self):
+        self.got: list[int] = []
+        self.old: dict = {}
+
+    def _note(self, signum, frame):
+        self.got.append(signum)
+
+    def __enter__(self):
+        for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+            sig = getattr(signal, name, None)
+            if sig is None:
+                continue
+            try:
+                self.old[sig] = signal.signal(sig, self._note)
+            except (OSError, ValueError):  # not the main thread, or unsupported here
+                pass
+        return self
+
+    def __exit__(self, *exc):
+        for sig, handler in self.old.items():
+            try:
+                signal.signal(sig, handler)
+            except (OSError, ValueError):
+                pass
+        self.old = {}
+        got, self.got = self.got, []
+        if got:
+            signal.raise_signal(got[0])
+        return False
 
 
 def _take_dir(path: str) -> bool:
@@ -447,6 +560,7 @@ class claude_lock:  # noqa: N801 - used like a function: `with claude_lock():`
     def __init__(self, required: bool = True):
         self.required = required
         self.held = False
+        self.signals = _DeferSignals()
 
     def __enter__(self):
         primary, legacy = claude_lock_dirs()
@@ -454,8 +568,15 @@ class claude_lock:  # noqa: N801 - used like a function: `with claude_lock():`
         deadline = time.monotonic() + CLAUDE_LOCK_WAIT_S
         while True:
             if _take_dir(primary):
-                if _take_dir(legacy):
+                try:
+                    got = _take_dir(legacy)
+                except OSError as e:  # say so, and do not leave the first one behind
+                    with contextlib.suppress(OSError):
+                        os.rmdir(primary)
+                    die(f"cannot take Claude Code's lock {legacy}: {e.strerror or e}")
+                if got:
                     self.held = True
+                    self.signals.__enter__()  # a kill while both are held would leave them for 60s
                     return self
                 try:
                     os.rmdir(primary)  # Claude Code lets go of the first one too
@@ -478,6 +599,7 @@ class claude_lock:  # noqa: N801 - used like a function: `with claude_lock():`
                 except OSError:
                     pass
             self.held = False
+            self.signals.__exit__(*exc)
         return False
 
 
@@ -491,11 +613,23 @@ def profiles_dir() -> str:
     return ACCOUNTS
 
 
+def safe_name(name: str) -> str:
+    """The name, if it cannot lead out of the accounts folder.
+
+    `check_name` is for names about to be created. Accounts already on disk may
+    be spelled oddly and keep working, but no name from the command line may hold
+    a path separator, or `rm ../notes` would delete ~/.claude/notes.json.
+    """
+    if not name or name in (".", "..") or "/" in name or os.sep in name or "\0" in name:
+        die(f"'{name}' is not an account name.")
+    return name
+
+
 def profile_path(name: str) -> str:
-    return os.path.join(profiles_dir(), f"{name}.json")
+    return os.path.join(profiles_dir(), f"{safe_name(name)}.json")
 
 
-VALID_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+VALID_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 def check_name(name: str) -> str:
@@ -556,7 +690,14 @@ def peek_profile(name: str) -> dict:
 
 
 def save_profile(name: str, block: dict, meta: dict | None = None):
-    data = read_json(profile_path(name))
+    path = profile_path(name)
+    data = peek_profile(name)
+    if not data and os.path.exists(path):
+        # What we hold is a login the server may already have retired the old one
+        # for, so it must be written. The file that will not parse goes aside, not away.
+        with contextlib.suppress(OSError):
+            os.replace(path, path + ".bak")
+            os.chmod(path + ".bak", 0o600)  # it may still hold a token, whatever mode it was left in
     data.update(meta or {})
     data["name"] = name
     data[OAUTH_KEY] = block
@@ -575,11 +716,7 @@ def read_ptr() -> str | None:
 
 def set_active_ptr(name: str):
     profiles_dir()
-    tmp = f"{ACTIVE_PTR}.tmp-{os.getpid()}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(name + "\n")
-    os.replace(tmp, ACTIVE_PTR)
+    write_text_secure(ACTIVE_PTR, name + "\n")
 
 
 # --------------------------------------------------------------- providers
@@ -596,7 +733,7 @@ PROVIDER_EXT = ".provider"
 
 
 def provider_path(name: str) -> str:
-    return os.path.join(ACCOUNTS, name + PROVIDER_EXT)
+    return os.path.join(ACCOUNTS, safe_name(name) + PROVIDER_EXT)
 
 
 def list_providers() -> list[str]:
@@ -627,11 +764,7 @@ def read_provider() -> str | None:
 
 def set_provider_ptr(name: str):
     profiles_dir()
-    tmp = f"{PROVIDER_PTR}.tmp-{os.getpid()}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(name + "\n")
-    os.replace(tmp, PROVIDER_PTR)
+    write_text_secure(PROVIDER_PTR, name + "\n")
 
 
 def clear_provider_ptr() -> str | None:
@@ -666,11 +799,13 @@ def active_name(check_api: bool = False) -> str | None:
     if not live:
         return None
     tok = live.get("accessToken")
-    for n in list_profiles():
-        if (peek_profile(n).get(OAUTH_KEY) or {}).get("accessToken") == tok:
-            return n
     ptr = read_ptr()
-    if not ptr or ptr not in list_profiles():
+    saved = list_profiles()
+    if tok:  # no token, no match: an empty one would match every unreadable profile
+        same = [n for n in saved if (peek_profile(n).get(OAUTH_KEY) or {}).get("accessToken") == tok]
+        if same:
+            return ptr if ptr in same else same[0]
+    if not ptr or ptr not in saved:
         return None
     if check_api:
         saved_uuid = load_profile(ptr).get("accountUuid")
@@ -684,6 +819,18 @@ def active_name(check_api: bool = False) -> str | None:
 
 
 _IDENT_CACHE: dict[str, dict] = {}
+
+
+def open_url(req, timeout: float):
+    """urlopen that does not follow a redirect: the bearer token goes to the host
+    it was made for and nowhere else. A redirect surfaces as an HTTP error."""
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    return urllib.request.build_opener(NoRedirect).open(req, timeout=timeout)
 
 
 def api_profile(token: str, timeout: float = API_TIMEOUT) -> tuple[int, dict]:
@@ -700,15 +847,21 @@ def api_profile(token: str, timeout: float = API_TIMEOUT) -> tuple[int, dict]:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read().decode())
+        with open_url(req, timeout) as r:
+            return r.status, as_object(json.loads(r.read().decode()))
     except urllib.error.HTTPError as e:
         try:
-            return e.code, json.loads(e.read().decode())
+            return e.code, as_object(json.loads(e.read().decode()))
         except Exception:
             return e.code, {}
     except Exception as e:
         return 0, {"error": str(e)}
+
+
+def as_object(data) -> dict:
+    """A server's JSON as a dict: anything else (a list, null) reads as empty, so a
+    reply of the wrong shape is a failed read, not a crash."""
+    return data if isinstance(data, dict) else {}
 
 
 def identity(block: dict) -> dict:
@@ -725,9 +878,10 @@ def identity(block: dict) -> dict:
 
 def _identity_uncached(tok: str) -> dict:
     status, body = api_profile(tok)
+    body = as_object(body)
     if status == 200:
-        a = body.get("account", {})
-        org = body.get("organization", {})
+        a = as_object(body.get("account"))  # null is a valid answer for either one
+        org = as_object(body.get("organization"))
         # Team/enterprise seats have neither the max nor the pro flag set; the
         # plan only shows up as the organization type.
         if a.get("has_claude_max"):
@@ -737,10 +891,10 @@ def _identity_uncached(tok: str) -> dict:
         else:
             plan = (org.get("organization_type") or "-").replace("claude_", "")
         return {
-            "email": a.get("email"),
-            "accountUuid": a.get("uuid"),
-            "plan": plan,
-            "org": org.get("name"),
+            "email": text_or_none(a.get("email")),
+            "accountUuid": text_or_none(a.get("uuid")),
+            "plan": text_or_none(plan) or "-",
+            "org": text_or_none(org.get("name")),
             "tokenState": "ok",
         }
     if status == 403:
@@ -822,8 +976,8 @@ def refresh_block(block: dict, timeout: float = API_TIMEOUT) -> tuple[dict | Non
         headers={"Content-Type": "application/json", "User-Agent": f"{PROG}/{VERSION}"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            payload = json.loads(r.read().decode())
+        with open_url(req, timeout) as r:
+            payload = json.loads(r.read(1 << 20).decode())
     except urllib.error.HTTPError as e:
         try:
             detail = json.loads(e.read().decode()).get("error_description") or ""
@@ -835,24 +989,28 @@ def refresh_block(block: dict, timeout: float = API_TIMEOUT) -> tuple[dict | Non
     except Exception as e:
         return None, {}, str(e)
 
-    if not payload.get("access_token") or not payload.get("refresh_token"):
+    payload = as_object(payload)
+    if not isinstance(payload.get("access_token"), str) or not isinstance(payload.get("refresh_token"), str) \
+            or not payload["access_token"] or not payload["refresh_token"]:
         return None, {}, "the token endpoint returned no credential"
+    # The new pair is the only copy: whatever else is odd in the reply must not stop it being saved.
     now = time.time()
     fresh = dict(block)
     fresh["accessToken"] = payload["access_token"]
     fresh["refreshToken"] = payload["refresh_token"]
-    fresh["expiresAt"] = int((now + payload.get("expires_in", 0)) * 1000)
-    if payload.get("refresh_token_expires_in"):
-        fresh["refreshTokenExpiresAt"] = int(
-            (now + payload["refresh_token_expires_in"]) * 1000
-        )
-    if payload.get("scope"):
+    expires_in = payload.get("expires_in")
+    lifetime = expires_in if finite_number(expires_in) and expires_in > 0 else 0
+    fresh["expiresAt"] = int((now + lifetime) * 1000)
+    life = payload.get("refresh_token_expires_in")
+    if finite_number(life) and life > 0:
+        fresh["refreshTokenExpiresAt"] = int((now + life) * 1000)
+    if isinstance(payload.get("scope"), str) and payload["scope"]:
         fresh["scopes"] = payload["scope"].split()
-    acct = payload.get("account") or {}
+    acct = as_object(payload.get("account"))
     ident = {
-        "email": acct.get("email_address"),
-        "accountUuid": acct.get("uuid"),
-        "org": (payload.get("organization") or {}).get("name"),
+        "email": text_or_none(acct.get("email_address")),
+        "accountUuid": text_or_none(acct.get("uuid")),
+        "org": text_or_none(as_object(payload.get("organization")).get("name")),
     }
     return fresh, {k: v for k, v in ident.items() if v}, ""
 
@@ -1107,8 +1265,11 @@ def _restore_signals(old: dict):
 
 
 def confirm(question: str, assume_yes: bool) -> bool:
-    if assume_yes or not sys.stdin.isatty():
+    if assume_yes:
         return True
+    if not sys.stdin.isatty():
+        info(f"{question} Not asked, because there is no terminal to ask on. Pass --yes to go ahead.")
+        return False
     try:
         return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
     except EOFError:
@@ -1123,19 +1284,50 @@ def slug(email: str) -> str:
     return f"{s}-acct" if s in COMMANDS else s
 
 
+def free_name(name: str, ident: dict | None = None) -> str:
+    """`name` if it is free to save a login under, else `name-2`, `name-3`, ...
+
+    A name is free when no account or provider has it, or when the account that
+    has it is the same one (same account uuid): then the login being saved is a
+    newer copy of that account and belongs there. Anything else is somebody
+    else's saved login, and writing over it would lose the only copy of it.
+    """
+    uuid = (ident or {}).get("accountUuid")
+    candidate, n = name, 1
+    while True:
+        if candidate in list_providers():
+            pass
+        elif not os.path.exists(profile_path(candidate)):
+            return candidate
+        elif uuid and peek_profile(candidate).get("accountUuid") == uuid:
+            return candidate
+        n += 1
+        candidate = f"{name}-{n}"
+
+
 def stash_live(live: dict) -> str:
     """Save an unrecognised live login under its own name. Returns that name."""
     ident = identity(live)
-    name = slug(ident["email"]) if ident.get("email") else f"unsaved-{int(time.time())}"
+    base = slug(ident["email"]) if ident.get("email") else f"unsaved-{int(time.time())}"
+    name = free_name(base, ident)
     save_profile(name, live, {k: v for k, v in ident.items() if k != "tokenState"})
     return name
+
+
+def save_live_copy(name: str, live: dict):
+    """Write the live login into its profile, unless the profile's own copy is the
+    newer one. A renewal cut off between its two writes leaves it so, and the live
+    copy then holds a refresh token that has already been retired."""
+    if _issued_later(peek_profile(name).get(OAUTH_KEY), live):
+        return
+    save_profile(name, live, {})
 
 
 def sync_live_before_switch(live: dict) -> str | None:
     """Never drop a login we cannot get back. Returns the profile it went to."""
     cur = active_name(check_api=True)
     if cur:
-        save_profile(cur, live, {})
+        save_live_copy(cur, live)
         return cur
     name = stash_live(live)
     info(f"{DIM}stashed the current login as '{name}' first{OFF}")
@@ -1175,7 +1367,7 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 USAGE_CACHE = os.path.join(ACCOUNTS, ".usage-cache")
 USAGE_FRESH_S = 60  # a reading this young is shown again without asking
 USAGE_THROTTLE_DEFAULT_S = 600  # when a 429 names no Retry-After
-USAGE_THROTTLE_MAX_S = 3600
+USAGE_THROTTLE_MAX_S = 6 * 3600  # the server's own number, within reason
 PROBE_MODEL = env("CLAUDE_HOP_PROBE_MODEL") or "haiku"
 PROBE_TIMEOUT_S = float(env("CLAUDE_HOP_PROBE_TIMEOUT") or 60.0)
 
@@ -1194,20 +1386,37 @@ def api_usage(token: str, timeout: float = API_TIMEOUT) -> tuple[int, dict, floa
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read().decode()), None
+        with open_url(req, timeout) as r:
+            return r.status, as_object(json.loads(r.read().decode())), None
     except urllib.error.HTTPError as e:
+        retry = parse_retry_after(e.headers.get("Retry-After"))
         try:
-            retry = float(e.headers.get("Retry-After") or "")
-        except ValueError:
-            retry = None
-        try:
-            body = json.loads(e.read().decode())
+            body = as_object(json.loads(e.read().decode()))
         except Exception:
             body = {}
         return e.code, body, retry
     except Exception as e:
         return 0, {"error": str(e)}, None
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """Seconds to wait from a Retry-After header, which is either a number of
+    seconds or an HTTP date. None when it is missing or not usable; never
+    negative, never infinite, never NaN."""
+    import math
+
+    if not value:
+        return None
+    try:
+        secs = float(value)
+    except ValueError:
+        from email.utils import parsedate_to_datetime
+
+        try:
+            secs = parsedate_to_datetime(value).timestamp() - time.time()
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+    return max(0.0, secs) if math.isfinite(secs) else None
 
 
 def parse_usage(body: dict) -> dict:
@@ -1221,7 +1430,7 @@ def parse_usage(body: dict) -> dict:
         if not isinstance(win, dict):
             continue
         pct = win.get("utilization")
-        if isinstance(pct, (int, float)) and not isinstance(pct, bool):
+        if finite_number(pct):
             out[key] = {"pct": float(pct), "resetsAt": win.get("resets_at")}
     return out
 
@@ -1240,7 +1449,7 @@ def parse_limits(body: dict) -> list | None:
     out = []
     for row in rows:
         pct = row.get("percent") if isinstance(row, dict) else None
-        if not isinstance(pct, (int, float)) or isinstance(pct, bool):
+        if not finite_number(pct):
             continue
         scope = row.get("scope") if isinstance(row.get("scope"), dict) else {}
         label = next(
@@ -1281,14 +1490,17 @@ def parse_probe(stream: str) -> dict | None:
         return None
 
     def iso(ts) -> str | None:
-        if isinstance(ts, (int, float)) and not isinstance(ts, bool):
-            return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+        if finite_number(ts):
+            try:
+                return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+            except (OverflowError, OSError, ValueError):
+                return None
         return None
 
     out = {}
     for key, win in (limit_info.get("unifiedWindows") or {}).items():
         pct = win.get("utilization") if isinstance(win, dict) else None
-        if isinstance(pct, (int, float)) and not isinstance(pct, bool):
+        if finite_number(pct):
             out[key] = {"pct": round(float(pct) * 100, 1), "resetsAt": iso(win.get("resetsAt"))}
     kind = limit_info.get("rateLimitType")
     if limit_info.get("status") == "rejected" and isinstance(kind, str) and kind:
@@ -1346,7 +1558,7 @@ def probe_usage(token: str) -> tuple[dict | None, str]:
         if isinstance(msg, dict) and msg.get("type") == "result":
             said = str(msg.get("result") or msg.get("subtype") or "")
     said = said or ((proc.stderr or "").strip().splitlines() or [""])[-1]
-    said = " ".join(said.split())[:80]
+    said = " ".join(printable(said).split())[:80]
     return None, f"claude gave no rate-limit figures ({said or f'exit {proc.returncode}'})"
 
 
@@ -1391,8 +1603,11 @@ def window_now(win: dict | None) -> dict | None:
 
 def weekly_limit(entry: dict) -> dict | None:
     """The fullest weekly meter in a reading's `limits` rows, or None."""
-    rows = [r for r in entry.get("limits") or [] if r.get("group") == "weekly"
-            or str(r.get("kind", "")).startswith("weekly")]
+    rows = []
+    for r in entry.get("limits") or []:
+        if r.get("group") == "weekly" or str(r.get("kind", "")).startswith("weekly"):
+            now = window_now(r)  # a row whose reset has passed counts as empty, not as its old figure
+            rows.append({**r, **now} if now and now.get("was") is not None else r)
     return max(rows, key=lambda r: r["pct"]) if rows else None
 
 
@@ -1425,21 +1640,29 @@ def renew_idle(name: str, block: dict, cur: str | None) -> tuple[dict, str]:
     left = refresh_left(block)
     if left is not None and left <= 0:
         return block, f"the login has expired - `{PROG} add {name}` to sign in again"
-    fresh, ident, err = refresh_block(block)
-    if not fresh:
-        return block, f"renewing it failed: {err}"
-    save_profile(name, fresh, ident)  # the old refresh token died with that call
+    with _DeferSignals():
+        fresh, ident, err = refresh_block(block)
+        if not fresh:
+            return block, f"renewing it failed: {err}"
+        save_profile(name, fresh, ident)  # the old refresh token died with that call
     return fresh, ""
 
 
 def usage_row(
-    entry: dict, block: dict, now: float, renew_hint: str = "", probe: bool = False, no_cache: bool = False
+    entry: dict,
+    block: dict,
+    now: float,
+    renew_hint: str = "",
+    probe: bool = False,
+    no_cache: bool = False,
+    fresh_s: float = USAGE_FRESH_S,
 ) -> dict:
     """One account's reading: the cached entry, refreshed if it is allowed and due.
 
     Returns the entry to keep (windows, limits, fetchedAt, source, throttledUntil)
     plus a `note` that says why a reading is old or missing. With probe=True, a
-    reading the endpoint would not give is taken through Claude Code instead.
+    reading the endpoint would not give is taken through Claude Code instead. A
+    reading younger than `fresh_s` is returned as it is, without asking anyone.
     """
     entry = dict(entry or {})
     entry.pop("note", None)
@@ -1447,7 +1670,7 @@ def usage_row(
         entry["note"] = "offline mode" if entry.get("windows") else "offline mode, nothing cached"
         return entry
     fetched = entry.get("fetchedAt") or 0
-    if not no_cache and entry.get("windows") is not None and now - fetched < USAGE_FRESH_S:
+    if not no_cache and entry.get("windows") is not None and now - fetched < fresh_s:
         return entry
     tok = block.get("accessToken")
     if not tok:
@@ -1489,11 +1712,13 @@ def usage_row(
     return entry
 
 
-def read_usage(names: list[str], probe: bool = False, no_cache: bool = False) -> tuple[dict, str | None]:
+def read_usage(
+    names: list[str], probe: bool = False, no_cache: bool = False, fresh_s: float = USAGE_FRESH_S
+) -> tuple[dict, str | None]:
     """Readings for these accounts, as fresh as the server allows, saved to the
     cache. Returns ({name: entry with its note}, the live account's name)."""
-    cur = active_name()
-    profiles = {n: load_profile(n) for n in names}
+    cur = active_name(check_api=True)  # a stale pointer would put another login's figures under this name
+    profiles = {n: peek_profile(n) for n in names}
     blocks = effective_blocks(profiles, cur, live_oauth())
     hints = {}
     for n in names:
@@ -1504,7 +1729,7 @@ def read_usage(names: list[str], probe: bool = False, no_cache: bool = False) ->
     now = time.time()
 
     def one(n: str) -> dict:
-        return usage_row(cache.get(n), blocks[n], now, hints[n], probe, no_cache)
+        return usage_row(cache.get(n), blocks[n], now, hints[n], probe, no_cache, fresh_s)
 
     if len(names) > 1 and not OFFLINE:
         from concurrent.futures import ThreadPoolExecutor
@@ -1621,11 +1846,21 @@ def read_next_list() -> list[str]:
 
 def write_next_list(names: list[str]):
     profiles_dir()
-    tmp = f"{NEXT_LIST}.tmp-{os.getpid()}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write("".join(n + "\n" for n in names))
-    os.replace(tmp, NEXT_LIST)
+    write_text_secure(NEXT_LIST, "".join(n + "\n" for n in names))
+
+
+def rename_in_next_list(old: str, new: str):
+    """After a rename, the new name takes the old one's place in the `next` list.
+    Without this the login silently drops out of it, because `next` skips any
+    name that is no longer saved. Comments and the order are kept."""
+    try:
+        with open(NEXT_LIST) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    if old not in (ln.strip() for ln in lines):
+        return
+    write_text_secure(NEXT_LIST, "".join((new if ln.strip() == old else ln) + "\n" for ln in lines))
 
 
 def standing(entry: dict, now: float) -> dict:
@@ -1683,13 +1918,29 @@ def cmd_next(names=None, yes=False, no_sync=False, **_):
 
     cur = active_name()
     others = [n for n in names if n != cur]
-    rows, _ = read_usage(others, probe=True)
+    # `use` refuses an account open in a run session, and a hop into one would sign it out.
+    busy = [n for n in others if run_pids(n)]
+    if busy:
+        info(f"{DIM}leaving out {', '.join(busy)}: open in a `{PROG} run` session{OFF}")
+        others = [n for n in others if n not in busy]
+    if not others:
+        why = ", ".join(busy) + " (open in run sessions)" if busy else "the list has only the one you are on"
+        die(f"no login in the list is free to hop to: {why}.")
+    # A reading `standing` counts as current is not asked for again: every request
+    # to the usage endpoint can earn a login an hour's refusal, and a probe spends
+    # some of that account's allowance.
+    rows, _ = read_usage(others, probe=True, fresh_s=NEXT_CURRENT_S)
     now = time.time()
     known = {n: standing(rows[n], now) for n in others}
     room = [n for n in others if known[n]["known"] and not known[n]["full"]]
-    # Most room first. Within ten points, the window that resets soonest goes
-    # first: what it has left is lost at the reset if nobody uses it.
-    room.sort(key=lambda n: (int(known[n]["pct"] // 10), known[n]["left"] or float("inf")))
+    # Most room first. Within ten points of the one with most, the window that
+    # resets soonest goes first: what it has left is lost at the reset if nobody
+    # uses it.
+    if room:
+        best = min(known[n]["pct"] for n in room)
+        near = sorted((n for n in room if known[n]["pct"] - best <= 10),
+                      key=lambda n: (known[n]["left"] or float("inf"), known[n]["pct"]))
+        room = near + sorted((n for n in room if n not in near), key=lambda n: known[n]["pct"])
 
     width = max(len(n) for n in others)
     for n in others:
@@ -1741,7 +1992,7 @@ NEVER_SHARED = {".credentials.json", ".credentials.json.bak", ".claude.json", "a
 
 
 def run_home(name: str) -> str:
-    return os.path.join(RUN_DIR, name)
+    return os.path.join(RUN_DIR, safe_name(name))
 
 
 def run_creds_path(name: str) -> str:
@@ -1784,8 +2035,8 @@ def run_pids(name: str) -> list[int]:
         return []
     alive = []
     for e in entries:
-        if not e.isdigit():
-            continue
+        if not (e.isascii() and e.isdigit()) or int(e) <= 1:
+            continue  # a pid, and one that is not "every process"
         pid = int(e)
         try:
             with open(os.path.join(d, e)) as f:
@@ -1945,8 +2196,13 @@ def remove_run_home(name: str):
     """Delete a run home. Symlinks are unlinked, never followed: they point at
     your real settings and projects."""
     home = run_home(name)
+    if os.path.islink(home):
+        os.remove(home)  # a link in the home's own place is removed, never walked into
+        return
     if not os.path.isdir(home):
         return
+    with contextlib.suppress(OSError):
+        os.remove(run_creds_path(name))  # the copy of the login goes first, whatever else cannot be removed
     for root, dirs, files in os.walk(home, topdown=False, followlinks=False):
         for f in files:
             os.remove(os.path.join(root, f))
@@ -1981,7 +2237,7 @@ def cmd_run(name=None, rest=None, **_):
         blk = target.get(OAUTH_KEY)
         if not blk:
             die(f"'{name}' has no saved credentials. Re-save it with `{PROG} add {name}`.")
-        if active_name() == name and live_oauth():
+        if active_name(check_api=True) == name and live_oauth():
             info(f"{DIM}'{name}' is the live login, so this is plain `claude`. "
                  f"A later hop moves it, as it does every open session.{OFF}")
             os.execv(claude, [claude, *rest])
@@ -2044,7 +2300,7 @@ def cmd_list(verify=False, as_json=False, long_=False, no_cache=False, **_):
             info(f"Log in with:  {PROG} add <name>")
         return
 
-    profiles = {n: load_profile(n) for n in names}
+    profiles = {n: peek_profile(n) for n in names}  # one that will not parse is shown, not a reason to stop
     blocks = effective_blocks(profiles, cur, live)
     idents: dict[str, dict] = {}
     if verify:
@@ -2086,7 +2342,8 @@ def cmd_list(verify=False, as_json=False, long_=False, no_cache=False, **_):
                 continue
             p = profiles[n]
             fresh_meta = {k: ident[k] for k in ("email", "plan", "accountUuid") if ident.get(k)}
-            if any(p.get(k) != v for k, v in fresh_meta.items()):
+            # `p` is empty when the file would not parse: never write over what we could not read.
+            if p and any(p.get(k) != v for k, v in fresh_meta.items()):
                 p.update(fresh_meta)
                 write_json_secure(profile_path(n), p)
 
@@ -2186,7 +2443,7 @@ def cmd_pick(yes=False, no_sync=False, verify=False, as_json=False, long_=False,
             cmd_list(verify=verify, as_json=as_json, long_=long_, no_cache=no_cache)
         return
 
-    profiles = {n: load_profile(n) for n in names}
+    profiles = {n: peek_profile(n) for n in names}
     cur = active_name()
     prov = active_provider()
     # Which one to pick is mostly a question of who has room left, so show the
@@ -2332,7 +2589,7 @@ def cmd_sync(**_):
     n = active_name(check_api=True)
     if not n:
         die(f"current login is not one of the saved accounts. Use `{PROG} save <name>`.")
-    save_profile(n, live, {})
+    save_live_copy(n, live)
     print(f"synced live login into {n}")
 
 
@@ -2354,7 +2611,7 @@ def cmd_renew(name=None, yes=False, **_):
         load_profile(name)  # dies with the usual message if it is not a real one
         names = [name]
 
-    cur = active_name()
+    cur = active_name(check_api=True)  # renewing writes under this name: be sure whose login is live
     live = live_oauth()
     failed = 0
     for n in names:
@@ -2367,7 +2624,7 @@ def cmd_renew(name=None, yes=False, **_):
             continue
         if not pids:
             capture_run_login(n)  # a session that has ended may hold the newer login
-        blk = live if (n == cur and live) else load_profile(n).get(OAUTH_KEY, {})
+        blk = live if (n == cur and live) else (load_profile(n).get(OAUTH_KEY) or {})
         # Renewing rotates the refresh token, and the old one dies with the call.
         # A session that is already running holds the old one, so rotating the
         # live login out from under it is the one way this command can cost you
@@ -2395,21 +2652,23 @@ def cmd_renew(name=None, yes=False, **_):
                 failed += 1
                 continue
 
-            fresh, ident, err = refresh_block(blk)
+            with _DeferSignals():  # a signal waits until the new pair is on disk
+                fresh, ident, err = refresh_block(blk)
+                if fresh:
+                    # Persist before anything else can run: the old refresh token is dead
+                    # from the moment that call returned.
+                    save_profile(n, fresh, ident)
+                    if n == cur:
+                        set_live_oauth(fresh)
             if not fresh:
                 print(f"  {RED}{n}{OFF}  {err}")
                 failed += 1
                 continue
-            # Persist before anything else can run: the old refresh token is dead
-            # from the moment that call returned.
-            save_profile(n, fresh, ident)
-            if n == cur:
-                set_live_oauth(fresh)
         note = refresh_warning(fresh)
         tail = f"  {YELLOW}{note}{OFF}" if note else ""
         print(f"  {GREEN}{n}{OFF}  access {expiry_note(fresh)}{tail}")
 
-    plan = relogin_plan({n: load_profile(n).get(OAUTH_KEY, {}) for n in list_profiles()})
+    plan = relogin_plan({n: peek_profile(n).get(OAUTH_KEY) or {} for n in list_profiles()})
     lines = relogin_lines(plan) if plan else []
     if lines:
         sys.stdout.flush()  # the results above go to stdout, these to stderr
@@ -2427,6 +2686,8 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
     if name in list_providers() and not os.path.exists(profile_path(name)):
         return cmd_provider_on(name=name)
     target = load_profile(name)
+    if not run_pids(name) and capture_run_login(name):
+        target = load_profile(name)  # a `run` session that did not end cleanly left a newer login in its home
     blk = target.get(OAUTH_KEY)
     if not blk:
         die(f"'{name}' has no saved credentials. Re-save it with `{PROG} add {name}`.")
@@ -2448,7 +2709,7 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
     # with one whose refresh token is already spent.
     if live and active_name(check_api=True) == name:
         if not no_sync:
-            save_profile(name, live, {})
+            save_live_copy(name, live)
         set_active_ptr(name)
         left = clear_provider_ptr()
         if left:
@@ -2457,6 +2718,9 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
             print(f"already on {GREEN}{name}{OFF} ({target.get('email') or '?'})")
         return
 
+    asked = live_oauth()
+    if asked and active_name(check_api=True) is None:
+        identity(asked)  # the locked section below stashes it, and must not have to ask whose it is
     pids = run_pids(name)
     if pids and not yes:
         die(
@@ -2471,9 +2735,11 @@ def cmd_use(name=None, yes=False, no_sync=False, **_):
     # report a dead token for an account that is fine.
     rleft = refresh_left(blk)
     if not OFFLINE and expired(blk) and (rleft is None or rleft > 0):
-        fresh, ident, err = refresh_block(blk)
+        with _DeferSignals():
+            fresh, ident, err = refresh_block(blk)
+            if fresh:
+                save_profile(name, fresh, ident)
         if fresh:
-            save_profile(name, fresh, ident)
             target, blk = load_profile(name), fresh
         else:
             info(f"{DIM}could not renew '{name}' first ({err}); using the saved token{OFF}")
@@ -2537,12 +2803,10 @@ def cmd_provider(name=None, new=None, **_):
     check_name(name)
     if name in COMMANDS or name in list_profiles():
         die(f"'{name}' is already a command or an account name; pick another.")
-    if not re.match(r"^[A-Za-z0-9._/~+-]+$", new):
+    if not re.match(r"^[A-Za-z0-9._/~+-]+\Z", new):
         die("the command must be one word with no arguments; put arguments in a small script.")
     profiles_dir()
-    fd = os.open(provider_path(name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(new + "\n")
+    write_text_secure(provider_path(name), new + "\n")
     print(f"registered provider {GREEN}{name}{OFF} (runs {new})")
     if not shutil.which(new):
         info(f"{YELLOW}note:{OFF} '{new}' is not on your PATH yet.")
@@ -2587,6 +2851,13 @@ def cmd_add(name=None, yes=False, **_):
         )
 
     prev_name = None
+    # Telling whose login is live is a network call when Claude Code has rotated
+    # the token since the last save, which is the usual case. Ask now, so the
+    # section below, which holds Claude Code's refresh lock, finds the answer
+    # remembered and does only file work.
+    asked = live_oauth()
+    if asked and active_name(check_api=True) is None:
+        identity(asked)  # stash_live will want to know whose it is
     with claude_lock():
         live = live_oauth()
         if live:
@@ -2746,7 +3017,27 @@ def cmd_rename(name=None, new=None, **_):
         os.rename(run_home(name), run_home(new))
     if was_active:
         set_active_ptr(new)
+    rename_in_next_list(name, new)
+    rename_cached(name, new)
     print(f"renamed {name} -> {new}")
+
+
+def rename_cached(old: str, new: str):
+    """The readings kept for an account follow it to its new name. Dropping them
+    would forget a refusal from the usage endpoint (`throttledUntil`), and the
+    next read would ask a login that was just told to wait."""
+    for path in (USAGE_CACHE, VERIFY_CACHE):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and old in data:
+            data[new] = data.pop(old)
+            try:
+                write_json_secure(path, data)
+            except OSError:
+                pass
 
 
 def cmd_doctor(fix=False, verify=False, as_json=False, **_):
@@ -2758,7 +3049,8 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
     live = live_oauth()
     names = list_profiles()
     profiles = {n: peek_profile(n) for n in names}
-    blocks = effective_blocks(profiles, active_name(), live)
+    cur = active_name(check_api=fix or verify)  # --fix writes under this name: be sure it is the right one
+    blocks = effective_blocks(profiles, cur, live)
     plan = relogin_plan(blocks)
 
     for var in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
@@ -2786,7 +3078,7 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
         if not profiles[n]:
             note("error", f"{p} is empty or not valid JSON; delete it and run `{PROG} add {n}`")
             continue
-        if not profiles[n].get(OAUTH_KEY, {}).get("accessToken"):
+        if not (profiles[n].get(OAUTH_KEY) or {}).get("accessToken"):
             note("error", f"'{n}' has no saved credentials; re-add it")
         warn = refresh_warning(blocks[n])
         if warn:
@@ -2794,9 +3086,9 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
         # The live account's snapshot drifts every time Claude Code rotates the
         # token. Harmless until you hop away and back, which restores the old
         # one - so say it while it is still cheap to fix.
-        saved = profiles[n].get(OAUTH_KEY, {})
+        saved = profiles[n].get(OAUTH_KEY) or {}
         if blocks[n] is not saved and saved.get("accessToken") != blocks[n].get("accessToken"):
-            where = "live login" if n == active_name() else "login in its run session"
+            where = "live login" if n == cur else "login in its run session"
             if fix:
                 save_profile(n, blocks[n], {})
                 note("warn", f"'{n}' saved copy was behind the {where}", "synced")
@@ -2847,7 +3139,7 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
     ptr = read_ptr()
     if ptr and ptr not in names:
         note("error", f"active pointer names '{ptr}', which is not a saved account")
-    if live and active_name(check_api=verify) is None:
+    if live and cur is None:
         note("warn", f"the live login does not match any saved account; `{PROG} save <name>`")
     if not live:
         note("warn", "not logged in right now")
@@ -2875,7 +3167,7 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
                     "configDir": CLAUDE_DIR,
                     "accountsDir": ACCOUNTS,
                     "accounts": names,
-                    "active": active_name(),
+                    "active": cur,
                     "provider": active_provider(),
                     "providers": provs,
                     "reloginPlan": plan,
@@ -2889,7 +3181,7 @@ def cmd_doctor(fix=False, verify=False, as_json=False, **_):
         print(f"  backend      {STORE.name} ({STORE.where})")
         print(f"  config dir   {CLAUDE_DIR}")
         print(f"  accounts     {ACCOUNTS} ({len(names)} saved)")
-        print(f"  active       {active_name() or '(none)'}")
+        print(f"  active       {cur or '(none)'}")
         if provs:
             print(f"  provider     {active_provider() or '(off)'} ({len(provs)} registered)")
         for i, line in enumerate(relogin_lines(plan) if plan else []):
@@ -2957,15 +3249,11 @@ def cmd_shell_init(**_):
             }}
             _claudehop_names() {{
               local d="${{CLAUDE_ACCOUNTS_DIR:-${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}/accounts}}" f n
-              for f in "$d"/*.json; do
+              for f in "$d"/*.json "$d"/*.provider; do
                 [ -e "$f" ] || continue
-                n="${{f##*/}}"
-                printf '%s ' "${{n%.json}}"
-              done
-              for f in "$d"/*.provider; do
-                [ -e "$f" ] || continue
-                n="${{f##*/}}"
-                printf '%s ' "${{n%.provider}}"
+                n="${{f##*/}}"; n="${{n%.json}}"; n="${{n%.provider}}"
+                case "$n" in *[!A-Za-z0-9._-]*) continue ;; esac  # compgen -W would run a $(...) in a name
+                printf '%s ' "$n"
               done
             }}
             _claudehop_complete() {{
@@ -3030,12 +3318,19 @@ FLAGS = {
 
 
 def main(argv: list[str]):
-    # `run` hands everything after the account name to claude, flags included.
-    if argv[:1] == ["run"]:
-        rest = argv[2:]
+    # `run` hands everything after the account name to claude, flags included. Our
+    # own flags may come before it (`hop -y run work`); they are not claude's.
+    # It takes the lock itself, only while it sets the session up: holding it for
+    # the whole session would block every other command, and holding it here as
+    # well would make `run` wait for itself.
+    lead = 0
+    while lead < len(argv) and argv[lead] in FLAGS:
+        lead += 1
+    if argv[lead:lead + 1] == ["run"]:
+        rest = argv[lead + 2:]
         if rest[:1] == ["--"]:
             rest = rest[1:]
-        cmd_run(name=argv[1] if len(argv) > 1 else None, rest=rest)
+        cmd_run(name=argv[lead + 1] if len(argv) > lead + 1 else None, rest=rest)
         return
 
     flags = {"yes": False, "verify": False, "long_": False, "no_sync": False,
@@ -3062,7 +3357,8 @@ def main(argv: list[str]):
         if sys.stdin.isatty() and sys.stdout.isatty():
             cmd_pick(**flags)
         else:
-            cmd_list(**flags)
+            with lock() if flags["verify"] else contextlib.nullcontext():  # --verify writes profiles back
+                cmd_list(**flags)
         return
 
     cmd = args[0] if args else "list"
@@ -3092,7 +3388,7 @@ def main(argv: list[str]):
         )
 
     # `list --verify` writes the refreshed email/plan back, so it needs the lock too.
-    if fn in READ_ONLY and not flags["verify"]:
+    if fn is cmd_run or (fn in READ_ONLY and not flags["verify"]):
         call()
     else:
         with lock():

@@ -27,7 +27,11 @@ WARN_DAYS = float(os.environ.get("CLAUDEHOP_WARN_DAYS") or 7)
 
 
 def hop(*args: str) -> tuple[int, str]:
-    p = subprocess.run([HOP, *args], capture_output=True, text=True, timeout=120)
+    try:
+        p = subprocess.run([HOP, *args], capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        print(f"claudehop {' '.join(args)} did not finish in 120 seconds", file=sys.stderr)
+        return 124, ""
     return p.returncode, p.stdout
 
 

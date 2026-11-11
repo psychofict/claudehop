@@ -5,13 +5,104 @@ This project follows [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-11-11
+
+A line-by-line audit of the tool, with each bug reproduced against 2.0.0 before it was fixed.
+The commands, flags, saved files and JSON output are the same as in 2.0.0. Two things behave
+differently, and they come first.
+
+### Changed
+
+- **A command that asks a question no longer answers "yes" when there is no terminal.** `rm`, and
+  `save` or `add` over a name that already exists, ask before they go ahead. With nobody to ask
+  (a script, a cron job, a pipe), 2.0.0 took that as a yes and went ahead. They now say that
+  they were not asked and change nothing; pass `--yes` to go ahead. A script that relied on the
+  old behaviour needs `--yes`. `use`, `renew`, `usage` and `next` never asked, so they are
+  unchanged.
+- **`hop next` now does what the documentation said.** Within ten points of the login with the
+  most room it prefers the window that resets soonest, but 2.0.0 compared in steps of ten (18%
+  and 22% fell in different steps, so the reset time was ignored). It also leaves out a login
+  that is open in a `hop run` session, which `hop use` refuses anyway, and it no longer asks the
+  usage endpoint again about a login whose reading is under five minutes old, which is how a
+  login earns a refusal.
+
+### Fixed
+
+Logins that could be lost or signed out:
+
+- **A login nobody had saved could overwrite another account.** Before a hop, claudehop saves a
+  live login that no profile owns under the name made from its email. If another account already
+  had that name, its login was replaced and the only copy of the stranger's was gone with it. The
+  name is now reused only for the same account (`accountUuid`); otherwise the login is saved as
+  `name-2`, `name-3` and so on.
+- **A saved login is only replaced by a later one.** A renewal cut off between its two writes
+  leaves the profile newer than the live copy, and the next hop wrote the older, already retired
+  refresh token over it. `use`, `sync` and the save before a hop now compare expiry first.
+- **`hop use` after a `hop run` session that died without saving** left the newer login in the run
+  home and hopped with the profile's older one. It now saves the home's login back first, unless
+  a session of that account is still open.
+- **Ctrl-C or a hangup in the middle of a renewal or a hop could lose the new login.** The signal is
+  now held until the new refresh token is on disk, then delivered.
+- **A saved login that will not parse is kept.** It is moved to `<name>.json.bak` (mode 600) before a
+  good login is written in its place, instead of being overwritten.
+- **`renew`, `doctor --fix`, `doctor --verify` and `run` trusted a stale `active` pointer.** `use` already
+  asked the API whose login is live before writing it under the pointer's name; these now do too,
+  so a login someone signed in with by hand is no longer renewed into another account's profile.
+- **Two saved logins holding the same token** no longer confuse the pointer, and a login with an
+  empty token no longer matches every profile that cannot be read.
+- **`rename` left the old name in the `next` list and the usage cache**, so the login dropped out
+  of `hop next` and lost the saved server refusal that told the next read to wait.
+
+Locks and waiting:
+
+- **`add` and `use` looked the live login up on the network while holding Claude Code's refresh
+  lock**, which Claude Code then waits behind. The lookup is now done first.
+- **`claudehop -y run NAME`** held claudehop's lock around the whole session and then waited for the
+  lock it already held. A bare `hop --verify` with no terminal now takes the lock, like
+  `hop list --verify`, because it writes what it learns back.
+- **A lock directory left held when the second of Claude Code's two directories could not be
+  made**, and a lock file that is a link, now give a plain message instead of a traceback or a
+  stuck lock. A keychain read that times out on macOS ends with a message.
+
+Input that is not what was expected:
+
+- **`rm ../x`, `use ../x` and `run ../x`** reached outside the accounts folder (`rm ../outside` deleted
+  `~/.claude/outside.json`). Names are checked wherever they become a path.
+- **Tab completion ran a command written into a file name.** A file called `x$(...).json` in `accounts/`
+  was run by `compgen` when you pressed Tab. The shell glue and `shell-init` now skip any name with
+  an unusual character.
+- **Valid JSON of the wrong shape** (`null`, a list, a null `claudeAiOauth`, a null account or
+  organization in a profile reply) ended in a traceback. Each is now reported, with the account
+  named, or ignored.
+- **`Retry-After`** is read as seconds or as an HTTP date, and a value that is not a finite,
+  non-negative number is ignored (`nan` once crashed the countdown). The wait is capped at six
+  hours rather than one.
+- **`hop usage` showed the old figure for a weekly meter whose reset time had already passed.** It
+  now shows it as empty.
+- **Replies from the server** are handled more carefully: the token reply is read up to 1 MiB, text
+  from a reply is printed without control characters, and no request follows a redirect with the
+  token attached.
+- **A write that failed left its temp file behind**, and a pointer write could leave one for
+  `doctor` to find. They are removed, and `doctor` lists any a killed write left.
+- **Removing a run home that is a link** to a real folder emptied the folder it pointed at. The
+  link is now removed and nothing behind it is touched.
+- `extras/claudehop-watch.py` no longer stops with a traceback when `claudehop` takes longer than
+  two minutes.
+
 ### Documentation
 
+- Claude Code 2.1.322 was checked against what the documentation says about it. It still takes
+  `.oauth_refresh.lock` and then `~/.claude.lock`, waits six attempts over about eight seconds
+  for a lock another tool holds, and never removes one younger than 60 seconds. It now also
+  writes `.oauth_refresh.lock.owner` beside the first lock, and a lock without that file is still
+  respected. An open interactive session sent its next message with the new login 0.91 to 0.92
+  seconds after a swap, in four runs out of four.
 - "How it works" lists the files another tool can read to follow claudehop without calling it
   (`active`, `provider`, `.usage-cache`, `next`, the `hop run` session records and the lock
   holder), what each holds, and the one rule: never copy a saved token.
 - The README points to Claude Usage Widget & Token Tracker, a Linux tray widget and dashboard that
   reads those files to show every account's usage and split tokens by account.
+- `SECURITY.md` describes the one `.bak` file claudehop keeps and the name checks above.
 
 ## [2.0.0] — 2026-10-13
 
